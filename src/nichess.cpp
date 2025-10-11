@@ -1,5 +1,6 @@
 #include "nichess/nichess.hpp"
 #include "nichess/util.hpp"
+#include "nichess/zobrist.hpp"
 
 #include <iostream>
 #include <sstream>
@@ -7,12 +8,10 @@
 #include <cmath>
 #include <tuple>
 #include <chrono>
+#include <algorithm>
 
 using namespace nichess;
 
-/*
- * Coordinates are not standard. Bottom left is (0,0) and top right is (7,7)
- */
 int nichess::coordinatesToBoardIndex(int column, int row) {
   return column + row * NUM_COLUMNS;
 }
@@ -25,26 +24,7 @@ std::tuple<int, int> nichess::boardIndexToCoordinates(int squareIndex) {
 
 PlayerAction::PlayerAction() { }
 
-PlayerAction::PlayerAction(int moveSrcIdx, int moveDstIdx, int abilitySrcIdx, int abilityDstIdx) {
-  this->moveSrcIdx = moveSrcIdx;
-  this->moveDstIdx = moveDstIdx;
-  this->abilitySrcIdx = abilitySrcIdx;
-  this->abilityDstIdx = abilityDstIdx;
-}
-
-PlayerMove::PlayerMove() { }
-
-PlayerMove::PlayerMove(int moveSrcIdx, int moveDstIdx) {
-  this->moveSrcIdx = moveSrcIdx;
-  this->moveDstIdx = moveDstIdx;
-}
-
-PlayerAbility::PlayerAbility() { }
-
-PlayerAbility::PlayerAbility(int abilitySrcIdx, int abilityDstIdx) {
-  this->abilitySrcIdx = abilitySrcIdx;
-  this->abilityDstIdx = abilityDstIdx;
-}
+PlayerAction::PlayerAction(int srcIdx, int dstIdx, ActionType actionType): srcIdx(srcIdx), dstIdx(dstIdx), actionType(actionType) { }
 
 Piece::Piece(): type(PieceType::NO_PIECE), healthPoints(0), squareIndex(0) { }
 
@@ -73,491 +53,875 @@ bool Piece::operator!=(const Piece& other) const {
 }
 
 UndoInfo::UndoInfo() {
-  for(int i = 0; i < 9; i++) {
-    this->affectedPieces[i] = nullptr;
+  this->affectedPieces.reserve(9);
+}
+
+UndoInfo::UndoInfo(PlayerAction playerAction) {
+  this->affectedPieces.reserve(9);
+  this->action = playerAction;
+}
+
+GameCache::GameCache() {}
+
+std::string intToDirectionString(int i) {
+  switch(i) {
+    case Direction::NORTH:
+      return "NORTH";
+    case Direction::NORTHEAST:
+      return "NORTHEAST";
+    case Direction::EAST:
+      return "EAST";
+    case Direction::SOUTHEAST:
+      return "SOUTHEAST";
+    case Direction::SOUTH:
+      return "SOUTH";
+    case Direction::SOUTHWEST:
+      return "SOUTHWEST";
+    case Direction::WEST:
+      return "WEST";
+    case Direction::NORTHWEST:
+      return "NORTHWEST";
+    case Direction::INVALID:
+      return "INVALID";
+    default:
+      return "OUT_OF_BOUNDS";
   }
 }
 
-UndoInfo::UndoInfo(int moveSrcIdx, int moveDstIdx, AbilityType abilityType) {
-  this->moveSrcIdx = moveSrcIdx;
-  this->moveDstIdx = moveDstIdx;
-  this->abilityType = abilityType;
-  for(int i = 0; i < 9; i++) {
-    this->affectedPieces[i] = nullptr;
-  }
+template<typename T>
+std::string convert2DVectorToString(const std::vector<std::vector<T>>& vec2D) {
+    std::stringstream ss;
+    
+    // Start with outer vector declaration
+    ss << "{\n";
+    
+    // Iterate through rows
+    for (size_t i = 0; i < vec2D.size(); ++i) {
+        // Skip empty vectors
+        if (vec2D[i].empty()) {
+            ss << "    {}";
+            if (i < vec2D.size() - 1) {
+                ss << ",";
+            }
+            ss << "\n";
+            continue;
+        }
+        
+        // Add inner vector opening brace
+        ss << "    {";
+        
+        // First element of row
+        if(typeid(T) == typeid(Direction)) {
+          ss << intToDirectionString(vec2D[i][0]);
+        } else {
+          ss << vec2D[i][0];
+        }
+        
+        // Remaining elements of row
+        for (size_t j = 1; j < vec2D[i].size(); ++j) {
+          if(typeid(T) == typeid(Direction)) {
+            ss << ", " << intToDirectionString(vec2D[i][j]);
+          } else {
+            ss << ", " << vec2D[i][j];
+          }
+        }
+        
+        // Close inner vector
+        ss << "}";
+        
+        // Add comma after all rows except last
+        if (i < vec2D.size() - 1) {
+            ss << ",";
+        }
+        
+        // Newline after each row
+        ss << "\n";
+    }
+    
+    // Add closing brace and semicolon
+    ss << "\n};\n";
+    
+    return ss.str();
 }
 
-GameCache::GameCache() {
-  pieceTypeToSquareIndexToLegalMoves = generateLegalMovesOnAnEmptyBoard();
-  pieceTypeToSquareIndexToLegalAbilities = generateLegalAbilitiesOnAnEmptyBoard();
-  squareToNeighboringSquares = generateSquareToNeighboringSquares();
+template<typename T>
+std::string convert3DVectorToString(const std::vector<std::vector<std::vector<T>>>& vec) {
+    std::ostringstream oss;
+    
+    // Opening brace
+    oss << "{\n";
+    
+    // Iterate through outermost vector
+    for(size_t i = 0; i < vec.size(); ++i) {
+        // Add comma and newline if not first element
+        if(i > 0) oss << ",\n";
+        
+        // Indentation for readability
+        oss << "    ";
+        
+        // Second level opening brace
+        oss << "{";
+        
+        // Iterate through middle dimension
+        for(size_t j = 0; j < vec[i].size(); ++j) {
+            // Add comma and space if not first element
+            if(j > 0) oss << ", ";
+            
+            // Third level opening brace
+            oss << "{";
+            
+            // Iterate through innermost dimension
+            for(size_t k = 0; k < vec[i][j].size(); ++k) {
+                // Add comma and space if not first element
+                if(k > 0) oss << ", ";
+                
+                // Output actual value
+                oss << vec[i][j][k];
+            }
+            
+            // Close third level brace
+            oss << "}";
+        }
+        
+        // Close second level brace
+        oss << "}";
+    }
+    
+    // Newline and closing brace
+    oss << "\n}";
+    
+    return oss.str();
+}
+
+void GameCache::print() {
+  // TODO: Make this print everything nicely so that it can be copy pasted into a header file.
+  std::string s1 = "std::vector<std::vector<int>> squareToP1PawnMoveSquares = " + convert2DVectorToString(generateSquareToP1PawnMoveSquares());
+  std::cout << s1 << "\n\n\n";
+  std::string s2 = "std::vector<std::vector<int>> squareToP2PawnMoveSquares = " + convert2DVectorToString(generateSquareToP2PawnMoveSquares());
+  std::cout << s2 << "\n\n\n";
+  std::string s3 = "std::vector<std::vector<int>> squareToP1PawnAbilitySquares = " + convert2DVectorToString(generateSquareToP1PawnAbilitySquares());
+  std::cout << s3 << "\n\n\n";
+  std::string s4 = "std::vector<std::vector<int>> squareToP2PawnAbilitySquares = " + convert2DVectorToString(generateSquareToP2PawnAbilitySquares());
+  std::cout << s4 << "\n\n\n";
 }
 
 void Game::reset() {
   moveNumber = 0;
   currentPlayer = Player::PLAYER_1;
   // Create starting position
-  board[coordinatesToBoardIndex(0,0)] = new Piece(PieceType::P1_KING, KING_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(0,0));
+  board[coordinatesToBoardIndex(0,0)] = new Piece(PieceType::P1_WARRIOR, WARRIOR_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(0,0));
+  board[coordinatesToBoardIndex(1,0)] = new Piece(PieceType::P1_KNIGHT, KNIGHT_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(1,0));
+  board[coordinatesToBoardIndex(2,0)] = new Piece(PieceType::P1_ASSASSIN, ASSASSIN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(2,0));
+  board[coordinatesToBoardIndex(3,0)] = new Piece(PieceType::P1_MAGE, MAGE_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(3,0));
+  board[coordinatesToBoardIndex(4,0)] = new Piece(PieceType::P1_KING, KING_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(4,0));
+board[coordinatesToBoardIndex(5,0)] = new Piece(PieceType::P1_ASSASSIN, ASSASSIN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(5,0));
+  board[coordinatesToBoardIndex(6,0)] = new Piece(PieceType::P1_KNIGHT, KNIGHT_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(6,0));
+  board[coordinatesToBoardIndex(7,0)] = new Piece(PieceType::P1_WARRIOR, WARRIOR_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(7,0));
+
   board[coordinatesToBoardIndex(0,1)] = new Piece(PieceType::P1_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(0,1));
   board[coordinatesToBoardIndex(1,1)] = new Piece(PieceType::P1_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(1,1));
-  board[coordinatesToBoardIndex(7,0)] = new Piece(PieceType::P1_ASSASSIN, ASSASSIN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(7,0));
-  board[coordinatesToBoardIndex(3,1)] = new Piece(PieceType::P1_WARRIOR, WARRIOR_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(3,1));
-  board[coordinatesToBoardIndex(4,1)] = new Piece(PieceType::P1_MAGE, MAGE_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(4,1));
+  board[coordinatesToBoardIndex(2,1)] = new Piece(PieceType::P1_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(2,1));
+  board[coordinatesToBoardIndex(3,1)] = new Piece(PieceType::P1_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(3,1));
+  board[coordinatesToBoardIndex(4,1)] = new Piece(PieceType::P1_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(4,1));
   board[coordinatesToBoardIndex(5,1)] = new Piece(PieceType::P1_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(5,1));
+  board[coordinatesToBoardIndex(6,1)] = new Piece(PieceType::P1_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(6,1));
+  board[coordinatesToBoardIndex(7,1)] = new Piece(PieceType::P1_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(7,1));
 
-  board[coordinatesToBoardIndex(7,7)] = new Piece(PieceType::P2_KING, KING_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(7,7));
-  board[coordinatesToBoardIndex(7,6)] = new Piece(PieceType::P2_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(7,6));
-  board[coordinatesToBoardIndex(6,6)] = new Piece(PieceType::P2_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(6,6));
-  board[coordinatesToBoardIndex(0,7)] = new Piece(PieceType::P2_ASSASSIN, ASSASSIN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(0,7));
-  board[coordinatesToBoardIndex(4,6)] = new Piece(PieceType::P2_WARRIOR, WARRIOR_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(4,6));
-  board[coordinatesToBoardIndex(3,6)] = new Piece(PieceType::P2_MAGE, MAGE_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(3,6));
+  board[coordinatesToBoardIndex(0,7)] = new Piece(PieceType::P2_WARRIOR, WARRIOR_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(0,7));
+  board[coordinatesToBoardIndex(1,7)] = new Piece(PieceType::P2_KNIGHT, KNIGHT_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(1,7));
+  board[coordinatesToBoardIndex(2,7)] = new Piece(PieceType::P2_ASSASSIN, ASSASSIN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(2,7));
+  board[coordinatesToBoardIndex(3,7)] = new Piece(PieceType::P2_MAGE, MAGE_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(3,7));
+  board[coordinatesToBoardIndex(4,7)] = new Piece(PieceType::P2_KING, KING_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(4,7));
+   board[coordinatesToBoardIndex(5,7)] = new Piece(PieceType::P2_ASSASSIN, ASSASSIN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(5,7));
+   board[coordinatesToBoardIndex(6,7)] = new Piece(PieceType::P2_KNIGHT, KNIGHT_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(6,7));
+  board[coordinatesToBoardIndex(7,7)] = new Piece(PieceType::P2_WARRIOR, WARRIOR_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(7,7));
+
+  board[coordinatesToBoardIndex(0,6)] = new Piece(PieceType::P2_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(0,6));
+  board[coordinatesToBoardIndex(1,6)] = new Piece(PieceType::P2_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(1,6));
   board[coordinatesToBoardIndex(2,6)] = new Piece(PieceType::P2_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(2,6));
+  board[coordinatesToBoardIndex(3,6)] = new Piece(PieceType::P2_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(3,6));
+  board[coordinatesToBoardIndex(4,6)] = new Piece(PieceType::P2_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(4,6));
+  board[coordinatesToBoardIndex(5,6)] = new Piece(PieceType::P2_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(5,6));
+  board[coordinatesToBoardIndex(6,6)] = new Piece(PieceType::P2_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(6,6));
+  board[coordinatesToBoardIndex(7,6)] = new Piece(PieceType::P2_PAWN, PAWN_STARTING_HEALTH_POINTS, coordinatesToBoardIndex(7,6));
 
   board[coordinatesToBoardIndex(0,2)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(0,2));
   board[coordinatesToBoardIndex(0,3)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(0,3));
   board[coordinatesToBoardIndex(0,4)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(0,4));
   board[coordinatesToBoardIndex(0,5)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(0,5));
-  board[coordinatesToBoardIndex(0,6)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(0,6));
-  board[coordinatesToBoardIndex(1,0)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(1,0));
   board[coordinatesToBoardIndex(1,2)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(1,2));
   board[coordinatesToBoardIndex(1,3)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(1,3));
   board[coordinatesToBoardIndex(1,4)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(1,4));
   board[coordinatesToBoardIndex(1,5)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(1,5));
-  board[coordinatesToBoardIndex(1,6)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(1,6));
-  board[coordinatesToBoardIndex(1,7)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(1,7));
-  board[coordinatesToBoardIndex(2,0)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(2,0));
-  board[coordinatesToBoardIndex(2,1)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(2,1));
   board[coordinatesToBoardIndex(2,2)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(2,2));
   board[coordinatesToBoardIndex(2,3)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(2,3));
   board[coordinatesToBoardIndex(2,4)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(2,4));
   board[coordinatesToBoardIndex(2,5)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(2,5));
-  board[coordinatesToBoardIndex(2,7)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(2,7));
-  board[coordinatesToBoardIndex(3,0)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(3,0));
   board[coordinatesToBoardIndex(3,2)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(3,2));
   board[coordinatesToBoardIndex(3,3)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(3,3));
   board[coordinatesToBoardIndex(3,4)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(3,4));
   board[coordinatesToBoardIndex(3,5)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(3,5));
-  board[coordinatesToBoardIndex(3,7)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(3,7));
-  board[coordinatesToBoardIndex(4,0)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(4,0));
   board[coordinatesToBoardIndex(4,2)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(4,2));
   board[coordinatesToBoardIndex(4,3)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(4,3));
   board[coordinatesToBoardIndex(4,4)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(4,4));
   board[coordinatesToBoardIndex(4,5)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(4,5));
-  board[coordinatesToBoardIndex(4,7)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(4,7));
-  board[coordinatesToBoardIndex(5,0)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(5,0));
   board[coordinatesToBoardIndex(5,2)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(5,2));
   board[coordinatesToBoardIndex(5,3)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(5,3));
   board[coordinatesToBoardIndex(5,4)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(5,4));
   board[coordinatesToBoardIndex(5,5)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(5,5));
-  board[coordinatesToBoardIndex(5,6)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(5,6));
-  board[coordinatesToBoardIndex(5,7)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(5,7));
-  board[coordinatesToBoardIndex(6,0)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(6,0));
-  board[coordinatesToBoardIndex(6,1)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(6,1));
   board[coordinatesToBoardIndex(6,2)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(6,2));
   board[coordinatesToBoardIndex(6,3)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(6,3));
   board[coordinatesToBoardIndex(6,4)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(6,4));
   board[coordinatesToBoardIndex(6,5)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(6,5));
-  board[coordinatesToBoardIndex(6,7)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(6,7));
-  board[coordinatesToBoardIndex(7,1)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(7,1));
   board[coordinatesToBoardIndex(7,2)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(7,2));
   board[coordinatesToBoardIndex(7,3)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(7,3));
   board[coordinatesToBoardIndex(7,4)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(7,4));
   board[coordinatesToBoardIndex(7,5)] = new Piece(PieceType::NO_PIECE, 0, coordinatesToBoardIndex(7,5));
 
-  // Piece pointers are also kept in an array for faster access
   std::vector<Piece*> p1Pieces{NUM_STARTING_PIECES};
-  p1Pieces[KING_PIECE_INDEX] = board[coordinatesToBoardIndex(0,0)];
-  p1Pieces[PAWN_1_PIECE_INDEX] = board[coordinatesToBoardIndex(0,1)];
-  p1Pieces[PAWN_2_PIECE_INDEX] = board[coordinatesToBoardIndex(1,1)];
-  p1Pieces[ASSASSIN_PIECE_INDEX] = board[coordinatesToBoardIndex(7,0)];
-  p1Pieces[WARRIOR_PIECE_INDEX] = board[coordinatesToBoardIndex(3,1)];
-  p1Pieces[MAGE_PIECE_INDEX] = board[coordinatesToBoardIndex(4,1)];
-  p1Pieces[PAWN_3_PIECE_INDEX] = board[coordinatesToBoardIndex(5,1)];
+  p1Pieces[0] = board[coordinatesToBoardIndex(0,0)];
+  p1Pieces[1] = board[coordinatesToBoardIndex(1,0)];
+  p1Pieces[2] = board[coordinatesToBoardIndex(2,0)];
+  p1Pieces[3] = board[coordinatesToBoardIndex(3,0)];
+  p1Pieces[4] = board[coordinatesToBoardIndex(4,0)];
+  p1Pieces[5] = board[coordinatesToBoardIndex(5,0)];
+  p1Pieces[6] = board[coordinatesToBoardIndex(6,0)];
+  p1Pieces[7] = board[coordinatesToBoardIndex(7,0)];
+
+  p1Pieces[8] = board[coordinatesToBoardIndex(0,1)];
+  p1Pieces[9] = board[coordinatesToBoardIndex(1,1)];
+  p1Pieces[10] = board[coordinatesToBoardIndex(2,1)];
+  p1Pieces[11] = board[coordinatesToBoardIndex(3,1)];
+  p1Pieces[12] = board[coordinatesToBoardIndex(4,1)];
+  p1Pieces[13] = board[coordinatesToBoardIndex(5,1)];
+  p1Pieces[14] = board[coordinatesToBoardIndex(6,1)];
+  p1Pieces[15] = board[coordinatesToBoardIndex(7,1)];
   playerToPieces[Player::PLAYER_1] = p1Pieces;
-  p1King = p1Pieces[KING_PIECE_INDEX];
+  playerToKing[Player::PLAYER_1] = p1Pieces[4];
 
   std::vector<Piece*> p2Pieces{NUM_STARTING_PIECES};
-  p2Pieces[KING_PIECE_INDEX] = board[coordinatesToBoardIndex(7,7)];
-  p2Pieces[PAWN_1_PIECE_INDEX] = board[coordinatesToBoardIndex(7,6)];
-  p2Pieces[PAWN_2_PIECE_INDEX] = board[coordinatesToBoardIndex(6,6)];
-  p2Pieces[ASSASSIN_PIECE_INDEX] = board[coordinatesToBoardIndex(0,7)];
-  p2Pieces[WARRIOR_PIECE_INDEX] = board[coordinatesToBoardIndex(4,6)];
-  p2Pieces[MAGE_PIECE_INDEX] = board[coordinatesToBoardIndex(3,6)];
-  p2Pieces[PAWN_3_PIECE_INDEX] = board[coordinatesToBoardIndex(2,6)];
+  p2Pieces[0] = board[coordinatesToBoardIndex(0,7)];
+  p2Pieces[1] = board[coordinatesToBoardIndex(1,7)];
+  p2Pieces[2] = board[coordinatesToBoardIndex(2,7)];
+  p2Pieces[3] = board[coordinatesToBoardIndex(3,7)];
+  p2Pieces[4] = board[coordinatesToBoardIndex(4,7)];
+  p2Pieces[5] = board[coordinatesToBoardIndex(5,7)];
+  p2Pieces[6] = board[coordinatesToBoardIndex(6,7)];
+  p2Pieces[7] = board[coordinatesToBoardIndex(7,7)];
+
+  p2Pieces[8] = board[coordinatesToBoardIndex(0,6)];
+  p2Pieces[9] = board[coordinatesToBoardIndex(1,6)];
+  p2Pieces[10] = board[coordinatesToBoardIndex(2,6)];
+  p2Pieces[11] = board[coordinatesToBoardIndex(3,6)];
+  p2Pieces[12] = board[coordinatesToBoardIndex(4,6)];
+  p2Pieces[13] = board[coordinatesToBoardIndex(5,6)];
+  p2Pieces[14] = board[coordinatesToBoardIndex(6,6)];
+  p2Pieces[15] = board[coordinatesToBoardIndex(7,6)];
+
   playerToPieces[Player::PLAYER_2] = p2Pieces;
-  p2King = p2Pieces[KING_PIECE_INDEX];
+  playerToKing[Player::PLAYER_2] = p2Pieces[4];
+
+  long int zh = zobristHash();
+  repetitions.insert({zh, 1});
+  repetitionsDraw = false;
 }
 
-Game::Game(GameCache& gameCache) {
-  this->gameCache = &gameCache;
+Game::Game() {
   reset();
 }
 
 Game::Game(const Game& other) {
   this->moveNumber = other.moveNumber;
   this->currentPlayer = other.currentPlayer;
-  this->gameCache = other.gameCache;
   for(int i = 0; i < NUM_SQUARES; i++) {
     board[i] = new Piece(*other.board[i]);
   }
 
   std::vector<Piece*> otherP1Pieces = other.playerToPieces[PLAYER_1];
   std::vector<Piece*> otherP2Pieces = other.playerToPieces[PLAYER_2];
-  std::vector<Piece*> p1Pieces{NUM_STARTING_PIECES};
+  std::vector<Piece*> p1Pieces;
+  std::vector<Piece*> p2Pieces;
 
-  Piece* otherP1King = otherP1Pieces[KING_PIECE_INDEX];
-  if(otherP1King->healthPoints > 0) {
-    p1Pieces[KING_PIECE_INDEX] = board[otherP1King->squareIndex];
-  } else {
-    p1Pieces[KING_PIECE_INDEX] = new Piece(PieceType::P1_KING, otherP1King->healthPoints, otherP1King->squareIndex);
+  for(int i = 0; i < otherP1Pieces.size(); i++) {
+    Piece* currentPiece = otherP1Pieces[i];
+    if(currentPiece->healthPoints > 0) {
+      p1Pieces.push_back(board[currentPiece->squareIndex]);
+    } else {
+      p1Pieces.push_back(new Piece(currentPiece->type, currentPiece->healthPoints, currentPiece->squareIndex));
+    }
+
   }
-  p1King = p1Pieces[KING_PIECE_INDEX];
-
-  Piece* otherP1Pawn1 = otherP1Pieces[PAWN_1_PIECE_INDEX];
-  if(otherP1Pawn1->healthPoints > 0) {
-    p1Pieces[PAWN_1_PIECE_INDEX] = board[otherP1Pawn1->squareIndex];
-  } else {
-    p1Pieces[PAWN_1_PIECE_INDEX] = new Piece(PieceType::P1_PAWN, otherP1Pawn1->healthPoints, otherP1Pawn1->squareIndex);
-  }
-
-  Piece* otherP1Pawn2 = otherP1Pieces[PAWN_2_PIECE_INDEX];
-  if(otherP1Pawn2->healthPoints > 0) {
-    p1Pieces[PAWN_2_PIECE_INDEX] = board[otherP1Pawn2->squareIndex];
-  } else {
-    p1Pieces[PAWN_2_PIECE_INDEX] = new Piece(PieceType::P1_PAWN, otherP1Pawn2->healthPoints, otherP1Pawn2->squareIndex);
-  }
-
-  Piece* otherP1Assassin = otherP1Pieces[ASSASSIN_PIECE_INDEX];
-  if(otherP1Assassin->healthPoints > 0) {
-    p1Pieces[ASSASSIN_PIECE_INDEX] = board[otherP1Assassin->squareIndex];
-  } else {
-    p1Pieces[ASSASSIN_PIECE_INDEX] = new Piece(PieceType::P1_ASSASSIN, otherP1Assassin->healthPoints, otherP1Assassin->squareIndex);
-  }
-
-  Piece* otherP1Warrior = otherP1Pieces[WARRIOR_PIECE_INDEX];
-  if(otherP1Warrior->healthPoints > 0) {
-    p1Pieces[WARRIOR_PIECE_INDEX] = board[otherP1Warrior->squareIndex];
-  } else {
-    p1Pieces[WARRIOR_PIECE_INDEX] = new Piece(PieceType::P1_WARRIOR, otherP1Warrior->healthPoints, otherP1Warrior->squareIndex);
-  }
-
-  Piece* otherP1Mage = otherP1Pieces[MAGE_PIECE_INDEX];
-  if(otherP1Mage->healthPoints > 0) {
-    p1Pieces[MAGE_PIECE_INDEX] = board[otherP1Mage->squareIndex];
-  } else {
-    p1Pieces[MAGE_PIECE_INDEX] = new Piece(PieceType::P1_MAGE, otherP1Mage->healthPoints, otherP1Mage->squareIndex);
-  }
-
-  Piece* otherP1Pawn3 = otherP1Pieces[PAWN_3_PIECE_INDEX];
-  if(otherP1Pawn3->healthPoints > 0) {
-    p1Pieces[PAWN_3_PIECE_INDEX] = board[otherP1Pawn3->squareIndex];
-  } else {
-    p1Pieces[PAWN_3_PIECE_INDEX] = new Piece(PieceType::P1_PAWN, otherP1Pawn3->healthPoints, otherP1Pawn3->squareIndex);
-  }
-
+  Piece* otherP1King = other.playerToKing[Player::PLAYER_1];
+  playerToKing[Player::PLAYER_1] = board[otherP1King->squareIndex];
   playerToPieces[Player::PLAYER_1] = p1Pieces;
 
-  std::vector<Piece*> p2Pieces{NUM_STARTING_PIECES};
+  for(int i = 0; i < otherP2Pieces.size(); i++) {
+    Piece* currentPiece = otherP2Pieces[i];
+    if(currentPiece->healthPoints > 0) {
+      p2Pieces.push_back(board[currentPiece->squareIndex]);
+    } else {
+      p2Pieces.push_back(new Piece(currentPiece->type, currentPiece->healthPoints, currentPiece->squareIndex));
+    }
 
-  Piece* otherP2King = otherP2Pieces[KING_PIECE_INDEX];
-  if(otherP2King->healthPoints > 0) {
-    p2Pieces[KING_PIECE_INDEX] = board[otherP2King->squareIndex];
-  } else {
-    p2Pieces[KING_PIECE_INDEX] = new Piece(PieceType::P2_KING, otherP2King->healthPoints, otherP2King->squareIndex);
   }
-  p2King = p2Pieces[KING_PIECE_INDEX];
-
-  Piece* otherP2Pawn1 = otherP2Pieces[PAWN_1_PIECE_INDEX];
-  if(otherP2Pawn1->healthPoints > 0) {
-    p2Pieces[PAWN_1_PIECE_INDEX] = board[otherP2Pawn1->squareIndex];
-  } else {
-    p2Pieces[PAWN_1_PIECE_INDEX] = new Piece(PieceType::P2_PAWN, otherP2Pawn1->healthPoints, otherP2Pawn1->squareIndex);
-  }
-
-  Piece* otherP2Pawn2 = otherP2Pieces[PAWN_2_PIECE_INDEX];
-  if(otherP2Pawn2->healthPoints > 0) {
-    p2Pieces[PAWN_2_PIECE_INDEX] = board[otherP2Pawn2->squareIndex];
-  } else {
-    p2Pieces[PAWN_2_PIECE_INDEX] = new Piece(PieceType::P2_PAWN, otherP2Pawn2->healthPoints, otherP2Pawn2->squareIndex);
-  }
-
-  Piece* otherP2Assassin = otherP2Pieces[ASSASSIN_PIECE_INDEX];
-  if(otherP2Assassin->healthPoints > 0) {
-    p2Pieces[ASSASSIN_PIECE_INDEX] = board[otherP2Assassin->squareIndex];
-  } else {
-    p2Pieces[ASSASSIN_PIECE_INDEX] = new Piece(PieceType::P2_ASSASSIN, otherP2Assassin->healthPoints, otherP2Assassin->squareIndex);
-  }
-
-  Piece* otherP2Warrior = otherP2Pieces[WARRIOR_PIECE_INDEX];
-  if(otherP2Warrior->healthPoints > 0) {
-    p2Pieces[WARRIOR_PIECE_INDEX] = board[otherP2Warrior->squareIndex];
-  } else {
-    p2Pieces[WARRIOR_PIECE_INDEX] = new Piece(PieceType::P2_WARRIOR, otherP2Warrior->healthPoints, otherP2Warrior->squareIndex);
-  }
-
-  Piece* otherP2Mage = otherP2Pieces[MAGE_PIECE_INDEX];
-  if(otherP2Mage->healthPoints > 0) {
-    p2Pieces[MAGE_PIECE_INDEX] = board[otherP2Mage->squareIndex];
-  } else {
-    p2Pieces[MAGE_PIECE_INDEX] = new Piece(PieceType::P2_MAGE, otherP2Mage->healthPoints, otherP2Mage->squareIndex);
-  }
-
-  Piece* otherP2Pawn3 = otherP2Pieces[PAWN_3_PIECE_INDEX];
-  if(otherP2Pawn3->healthPoints > 0) {
-    p2Pieces[PAWN_3_PIECE_INDEX] = board[otherP2Pawn3->squareIndex];
-  } else {
-    p2Pieces[PAWN_3_PIECE_INDEX] = new Piece(PieceType::P2_PAWN, otherP2Pawn3->healthPoints, otherP2Pawn3->squareIndex);
-  }
-
+  Piece* otherP2King = other.playerToKing[Player::PLAYER_2];
+  playerToKing[Player::PLAYER_2] = board[otherP2King->squareIndex];
   playerToPieces[Player::PLAYER_2] = p2Pieces;
+  repetitions = other.repetitions;
+  repetitionsDraw = other.repetitionsDraw;
 }
 
-Game::Game(GameCache& gameCache, const std::string encodedBoard) {
-  this->gameCache = &gameCache;
+Game::Game(const std::string encodedBoard) {
   boardFromString(encodedBoard);
+  long int zh = zobristHash();
+  repetitions.insert({zh, 1});
+  repetitionsDraw = false;
 }
 
 Game::~Game() {
   for(Piece* p: playerToPieces[PLAYER_1]) {
-    if(p->healthPoints <= 0) delete p;
+    if(p->healthPoints <= 0) {
+      delete p;
+    }
   }
   for(Piece* p: playerToPieces[PLAYER_2]) {
-    if(p->healthPoints <= 0) delete p;
+    if(p->healthPoints <= 0) {
+      delete p;
+    }
   }
-
+  
   for(int i = 0; i < NUM_SQUARES; i++) {
-    delete board[i];
+      delete board[i];
   }
 }
 
 
 /*
- * Assumes that the move and ability are legal.
- * If the ability is not useful (i.e. does not alter the game state), it's converted to
- * AbilityType::NO_ABILITY.
- * Checking whether ability is useful makes the function ~1.5% slower.
+ * Assumes the action is legal.
  */
-UndoInfo Game::makeAction(int moveSrcIdx, int moveDstIdx, int abilitySrcIdx, int abilityDstIdx) {
-  UndoInfo undoInfo = UndoInfo();
-  undoInfo.moveSrcIdx = moveSrcIdx;
-  undoInfo.moveDstIdx = moveDstIdx;
-  if(moveSrcIdx != MOVE_SKIP) {
-    makeMove(moveSrcIdx, moveDstIdx);
-  }
-  if(abilitySrcIdx != ABILITY_SKIP) {
-    Piece* abilitySrcPiece = board[abilitySrcIdx];
-    Piece* abilityDstPiece = board[abilityDstIdx];
-    Piece* neighboringPiece;
-    int neighboringSquare;
-    switch(abilitySrcPiece->type) {
+UndoInfo Game::makeAction(PlayerAction playerAction) {
+  UndoInfo undoInfo = UndoInfo(playerAction);
+  if(playerAction.actionType != ActionType::SKIP) {
+    int srcIdx = playerAction.srcIdx;
+    int dstIdx = playerAction.dstIdx;
+    Piece* abilitySrcPiece = board[srcIdx];
+    Piece* abilityDstPiece = board[dstIdx];
+    Piece *currentPiece;
+    int currentSquare;
+    Direction direction;
+    const std::vector<int> *directionLine;
+    const std::vector<int> *squares;
+    int idx;
+    Player opponentPlayer;
+    switch(playerAction.actionType) {
+      case ActionType::MOVE_REGULAR:
+        delete board[dstIdx];
+        board[dstIdx] = board[srcIdx];
+        board[dstIdx]->squareIndex = dstIdx;
+        board[srcIdx] = new Piece(PieceType::NO_PIECE, 0, srcIdx);
+        break;
+      case ActionType::MOVE_CASTLE:
+        // move king
+        delete board[dstIdx];
+        board[dstIdx] = this->board[srcIdx];
+        board[dstIdx]->squareIndex = dstIdx;
+        board[srcIdx] = new Piece(PieceType::NO_PIECE, 0, srcIdx);
+
+        // move warrior
+        // based on king's destination we can determine which castle it is
+        if(dstIdx == 6) {
+          //p1 short castle
+          delete board[5];
+          board[5] = this->board[7];
+          board[5]->squareIndex = 5;
+          board[7] = new Piece(PieceType::NO_PIECE, 0, 7);
+        } else if(dstIdx == 2) {
+          //p1 long castle
+          delete board[3];
+          board[3] = this->board[0];
+          board[3]->squareIndex = 3;
+          board[0] = new Piece(PieceType::NO_PIECE, 0, 0);
+        } else if(dstIdx == 62) {
+          //p2 short castle
+          delete board[61];
+          board[61] = this->board[63];
+          board[61]->squareIndex = 61;
+          board[63] = new Piece(PieceType::NO_PIECE, 0, 63);
+        } else { // p2 long castle
+          delete board[59];
+          board[59] = this->board[56];
+          board[59]->squareIndex = 59;
+          board[56] = new Piece(PieceType::NO_PIECE, 0, 56);
+        }
+        break;
+      case ActionType::MOVE_PROMOTE_P1_PAWN:
+        undoInfo.t1 = abilitySrcPiece->healthPoints;
+        delete board[dstIdx];
+        board[dstIdx] = board[srcIdx];
+        board[dstIdx]->squareIndex = dstIdx;
+        board[dstIdx]->type = PieceType::P1_WARRIOR;
+        board[dstIdx]->healthPoints = WARRIOR_STARTING_HEALTH_POINTS;
+        board[srcIdx] = new Piece(PieceType::NO_PIECE, 0, srcIdx);
+        break;
+      case ActionType::MOVE_PROMOTE_P2_PAWN:
+        undoInfo.t1 = abilitySrcPiece->healthPoints;
+        delete board[dstIdx];
+        board[dstIdx] = board[srcIdx];
+        board[dstIdx]->squareIndex = dstIdx;
+        board[dstIdx]->type = PieceType::P2_WARRIOR;
+        board[dstIdx]->healthPoints = WARRIOR_STARTING_HEALTH_POINTS;
+        board[srcIdx] = new Piece(PieceType::NO_PIECE, 0, srcIdx);
+        break;
       // king does single target damage
-      case P1_KING:
-        if(player1OrEmpty(abilityDstPiece->type)) {
-          undoInfo.abilityType = AbilityType::NO_ABILITY;
-          break;
-        }
+      case ActionType::ABILITY_KING_DAMAGE:
         abilityDstPiece->healthPoints -= KING_ABILITY_POINTS;
-        undoInfo.abilityType = AbilityType::KING_DAMAGE;
-        undoInfo.affectedPieces[0] = abilityDstPiece;
+        undoInfo.affectedPieces.push_back(abilityDstPiece);
         if(abilityDstPiece->healthPoints <= 0) {
-          board[abilityDstIdx] = new Piece(PieceType::NO_PIECE, 0, abilityDstIdx);
+          // move piece to the destroyed piece's location
+          this->board[dstIdx] = abilitySrcPiece;
+          this->board[srcIdx] = new Piece(PieceType::NO_PIECE, 0, srcIdx);
+          abilitySrcPiece->squareIndex = dstIdx;
         }
         break;
-      // mage damages attacked piece and all enemy pieces that are touching it
-      case P1_MAGE:
-        if(player1OrEmpty(abilityDstPiece->type)) {
-          undoInfo.abilityType = AbilityType::NO_ABILITY;
-          break;
-        }
+      case ActionType::ABILITY_MAGE_DAMAGE:
         abilityDstPiece->healthPoints -= MAGE_ABILITY_POINTS;
-        undoInfo.abilityType = AbilityType::MAGE_DAMAGE;
-        undoInfo.affectedPieces[0] = abilityDstPiece;
+        undoInfo.affectedPieces.push_back(abilityDstPiece);
         if(abilityDstPiece->healthPoints <= 0) {
-          board[abilityDstIdx] = new Piece(PieceType::NO_PIECE, 0, abilityDstIdx);
-        }
-        for(int i = 0; i < gameCache->squareToNeighboringSquares[abilityDstIdx].size(); i++) {
-          neighboringSquare = gameCache->squareToNeighboringSquares[abilityDstIdx][i];
-          neighboringPiece = board[neighboringSquare];
-          if(player1OrEmpty(neighboringPiece->type)) continue;  // don't damage your own pieces
-          neighboringPiece->healthPoints -= MAGE_ABILITY_POINTS;
-          // i+1 because 0 is for abilityDstPiece
-          undoInfo.affectedPieces[i+1] = neighboringPiece;
-          if(neighboringPiece->healthPoints <= 0) {
-            board[neighboringSquare] = new Piece(NO_PIECE, 0, neighboringSquare);
+          // move piece to the destroyed piece's location
+          this->board[dstIdx] = abilitySrcPiece;
+          this->board[srcIdx] = new Piece(PieceType::NO_PIECE, 0, srcIdx);
+          abilitySrcPiece->squareIndex = dstIdx;
+        } else {
+          direction = GameCache::srcSquareToDstSquareToDirection[srcIdx][dstIdx];
+          directionLine = &GameCache::squareToDirectionToLine[srcIdx][direction];
+          idx = 0;
+          while(true) {
+            currentPiece = board[(*directionLine)[idx]];
+            if(!(currentPiece->type == PieceType::NO_PIECE)) break;
+            idx++;
+          }
+          if(idx != 0) {
+            // leap
+            currentSquare = (*directionLine)[idx-1];
+            undoInfo.t1 = currentSquare;
+            
+            delete board[currentSquare];
+            board[currentSquare] = board[srcIdx];
+            board[currentSquare]->squareIndex = currentSquare;
+            board[srcIdx] = new Piece(PieceType::NO_PIECE, 0, srcIdx);
           }
         }
         break;
-      case P1_PAWN:
-        if(player1OrEmpty(abilityDstPiece->type)) {
-          undoInfo.abilityType = AbilityType::NO_ABILITY;
-          break;
+      case ActionType::ABILITY_MAGE_THROW_ASSASSIN:
+        if(abilitySrcPiece->type == P1_MAGE) {
+          opponentPlayer = Player::PLAYER_2;
+        } else {
+          opponentPlayer = Player::PLAYER_1;
         }
+        direction = GameCache::srcSquareToDstSquareToDirection[srcIdx][dstIdx];
+        directionLine = &GameCache::squareToDirectionToLine[srcIdx][direction];
+        idx = (*directionLine)[0]; // assassin to be thrown is at this index
+        undoInfo.t1 = idx;
+        undoInfo.affectedPieces.push_back(board[idx]);
+
+        abilityDstPiece->healthPoints -= MAGE_THROW_DAMAGE_1;
+        undoInfo.affectedPieces.push_back(abilityDstPiece);
+
+        // throw assassin
+        board[dstIdx] = board[idx];
+        board[dstIdx]->squareIndex = dstIdx;
+        board[idx] = new Piece(PieceType::NO_PIECE, 0, idx);
+
+
+        // AOE damage
+        squares = &GameCache::squareToNeighboringSquares[dstIdx];
+        for(int i = 0; i < squares->size(); i++) {
+          currentPiece = board[(*squares)[i]];
+          if(pieceBelongsToPlayer(currentPiece->type, opponentPlayer)) {
+            currentPiece->healthPoints -= MAGE_THROW_DAMAGE_2;
+            undoInfo.affectedPieces.push_back(currentPiece);
+            if(currentPiece->healthPoints <= 0) {
+              board[currentPiece->squareIndex] = new Piece(PieceType::NO_PIECE, 0, currentPiece->squareIndex);
+            }
+          }
+        }
+
+        break;
+      case ActionType::ABILITY_PAWN_DAMAGE:
         abilityDstPiece->healthPoints -= PAWN_ABILITY_POINTS;
-        undoInfo.abilityType = AbilityType::PAWN_DAMAGE;
-        undoInfo.affectedPieces[0] = abilityDstPiece;
+        undoInfo.affectedPieces.push_back(abilityDstPiece);
         if(abilityDstPiece->healthPoints <= 0) {
-          board[abilityDstIdx] = new Piece(PieceType::NO_PIECE, 0, abilityDstIdx);
+          // move piece to the destroyed piece's location
+          this->board[dstIdx] = abilitySrcPiece;
+          this->board[srcIdx] = new Piece(PieceType::NO_PIECE, 0, srcIdx);
+          abilitySrcPiece->squareIndex = dstIdx;
         }
         break;
-      case P1_WARRIOR:
-        if(player1OrEmpty(abilityDstPiece->type)) {
-          undoInfo.abilityType = AbilityType::NO_ABILITY;
-          break;
-        }
+      case ActionType::ABILITY_P1_PAWN_DAMAGE_AND_PROMOTION:
+        undoInfo.t1 = abilitySrcPiece->healthPoints;
+
+        abilityDstPiece->healthPoints -= PAWN_ABILITY_POINTS;
+        undoInfo.affectedPieces.push_back(abilityDstPiece);
+
+        board[dstIdx] = board[srcIdx];
+        board[dstIdx]->squareIndex = dstIdx;
+        board[dstIdx]->type = PieceType::P1_WARRIOR;
+        board[dstIdx]->healthPoints = WARRIOR_STARTING_HEALTH_POINTS;
+        board[srcIdx] = new Piece(PieceType::NO_PIECE, 0, srcIdx);
+        break;
+      case ActionType::ABILITY_P2_PAWN_DAMAGE_AND_PROMOTION:
+        undoInfo.t1 = abilitySrcPiece->healthPoints;
+
+        abilityDstPiece->healthPoints -= PAWN_ABILITY_POINTS;
+        undoInfo.affectedPieces.push_back(abilityDstPiece);
+
+        board[dstIdx] = board[srcIdx];
+        board[dstIdx]->squareIndex = dstIdx;
+        board[dstIdx]->type = PieceType::P2_WARRIOR;
+        board[dstIdx]->healthPoints = WARRIOR_STARTING_HEALTH_POINTS;
+        board[srcIdx] = new Piece(PieceType::NO_PIECE, 0, srcIdx);
+        break;
+      case ActionType::ABILITY_WARRIOR_DAMAGE:
         abilityDstPiece->healthPoints -= WARRIOR_ABILITY_POINTS;
-        undoInfo.abilityType = AbilityType::WARRIOR_DAMAGE;
-        undoInfo.affectedPieces[0] = abilityDstPiece;
+        undoInfo.affectedPieces.push_back(abilityDstPiece);
         if(abilityDstPiece->healthPoints <= 0) {
-          board[abilityDstIdx] = new Piece(PieceType::NO_PIECE, 0, abilityDstIdx);
-        }
-        break;
-      case P1_ASSASSIN:
-        if(player1OrEmpty(abilityDstPiece->type)) {
-          undoInfo.abilityType = AbilityType::NO_ABILITY;
-          break;
-        }
-        abilityDstPiece->healthPoints -= ASSASSIN_ABILITY_POINTS;
-        undoInfo.abilityType = AbilityType::ASSASSIN_DAMAGE;
-        undoInfo.affectedPieces[0] = abilityDstPiece;
-        if(abilityDstPiece->healthPoints <= 0) {
-          board[abilityDstIdx] = new Piece(PieceType::NO_PIECE, 0, abilityDstIdx);
-        }
-        break;
-      case P2_KING:
-        if(player2OrEmpty(abilityDstPiece->type)) {
-          undoInfo.abilityType = AbilityType::NO_ABILITY;
-          break;
-        }
-        abilityDstPiece->healthPoints -= KING_ABILITY_POINTS;
-        undoInfo.abilityType = AbilityType::KING_DAMAGE;
-        undoInfo.affectedPieces[0] = abilityDstPiece;
-        if(abilityDstPiece->healthPoints <= 0) {
-          board[abilityDstIdx] = new Piece(PieceType::NO_PIECE, 0, abilityDstIdx);
-        }
-        break;
-      case P2_MAGE:
-        if(player2OrEmpty(abilityDstPiece->type)) {
-          undoInfo.abilityType = AbilityType::NO_ABILITY;
-          break;
-        }
-        abilityDstPiece->healthPoints -= MAGE_ABILITY_POINTS;
-        undoInfo.abilityType = AbilityType::MAGE_DAMAGE;
-        undoInfo.affectedPieces[0] = abilityDstPiece;
-        if(abilityDstPiece->healthPoints <= 0) {
-          board[abilityDstIdx] = new Piece(PieceType::NO_PIECE, 0, abilityDstIdx);
-        }
-        for(int i = 0; i < gameCache->squareToNeighboringSquares[abilityDstIdx].size(); i++) {
-          neighboringSquare = gameCache->squareToNeighboringSquares[abilityDstIdx][i];
-          neighboringPiece = board[neighboringSquare];
-          if(player2OrEmpty(neighboringPiece->type)) continue;  // don't damage your own pieces
-          neighboringPiece->healthPoints -= MAGE_ABILITY_POINTS;
-          // i+1 because 0 is for abilityDstPiece
-          undoInfo.affectedPieces[i+1] = neighboringPiece;
-          if(neighboringPiece->healthPoints <= 0) {
-            board[neighboringSquare] = new Piece(NO_PIECE, 0, neighboringSquare);
+          // move piece to the destroyed piece's location
+          this->board[dstIdx] = abilitySrcPiece;
+          this->board[srcIdx] = new Piece(PieceType::NO_PIECE, 0, srcIdx);
+          abilitySrcPiece->squareIndex = dstIdx;
+        } else {
+          direction = GameCache::srcSquareToDstSquareToDirection[srcIdx][dstIdx];
+          directionLine = &GameCache::squareToDirectionToLine[srcIdx][direction];
+          idx = 0;
+          while(true) {
+            currentPiece = board[(*directionLine)[idx]];
+            if(!(currentPiece->type == PieceType::NO_PIECE)) break;
+            idx++;
+          }
+          if(idx != 0) {
+            // leap
+            currentSquare = (*directionLine)[idx-1];
+            undoInfo.t1 = currentSquare;
+            
+            delete board[currentSquare];
+            board[currentSquare] = board[srcIdx];
+            board[currentSquare]->squareIndex = currentSquare;
+            board[srcIdx] = new Piece(PieceType::NO_PIECE, 0, srcIdx);
           }
         }
         break;
-      case P2_PAWN:
-        if(player2OrEmpty(abilityDstPiece->type)) {
-          undoInfo.abilityType = AbilityType::NO_ABILITY;
-          break;
-        }
-        abilityDstPiece->healthPoints -= PAWN_ABILITY_POINTS;
-        undoInfo.abilityType = AbilityType::PAWN_DAMAGE;
-        undoInfo.affectedPieces[0] = abilityDstPiece;
-        if(abilityDstPiece->healthPoints <= 0) {
-          board[abilityDstIdx] = new Piece(PieceType::NO_PIECE, 0, abilityDstIdx);
-        }
-        break;
-      case P2_WARRIOR:
-        if(player2OrEmpty(abilityDstPiece->type)) {
-          undoInfo.abilityType = AbilityType::NO_ABILITY;
-          break;
-        }
-        abilityDstPiece->healthPoints -= WARRIOR_ABILITY_POINTS;
-        undoInfo.abilityType = AbilityType::WARRIOR_DAMAGE;
-        undoInfo.affectedPieces[0] = abilityDstPiece;
-        if(abilityDstPiece->healthPoints <= 0) {
-          board[abilityDstIdx] = new Piece(PieceType::NO_PIECE, 0, abilityDstIdx);
-        }
-        break;
-      case P2_ASSASSIN:
-        if(player2OrEmpty(abilityDstPiece->type)) {
-          undoInfo.abilityType = AbilityType::NO_ABILITY;
-          break;
-        }
+      case ActionType::ABILITY_ASSASSIN_DAMAGE:
         abilityDstPiece->healthPoints -= ASSASSIN_ABILITY_POINTS;
-        undoInfo.abilityType = AbilityType::ASSASSIN_DAMAGE;
-        undoInfo.affectedPieces[0] = abilityDstPiece;
+        undoInfo.affectedPieces.push_back(abilityDstPiece);
         if(abilityDstPiece->healthPoints <= 0) {
-          board[abilityDstIdx] = new Piece(PieceType::NO_PIECE, 0, abilityDstIdx);
+          // move piece to the destroyed piece's location
+          this->board[dstIdx] = abilitySrcPiece;
+          this->board[srcIdx] = new Piece(PieceType::NO_PIECE, 0, srcIdx);
+          abilitySrcPiece->squareIndex = dstIdx;
+        } else {
+          direction = GameCache::srcSquareToDstSquareToDirection[srcIdx][dstIdx];
+          directionLine = &GameCache::squareToDirectionToLine[srcIdx][direction];
+          idx = 0;
+          while(true) {
+            currentPiece = board[(*directionLine)[idx]];
+            if(!(currentPiece->type == PieceType::NO_PIECE)) break;
+            idx++;
+          }
+          if(idx != 0) {
+            // leap
+            currentSquare = (*directionLine)[idx-1];
+            undoInfo.t1 = currentSquare;
+            
+            delete board[currentSquare];
+            board[currentSquare] = board[srcIdx];
+            board[currentSquare]->squareIndex = currentSquare;
+            board[srcIdx] = new Piece(PieceType::NO_PIECE, 0, srcIdx);
+          }
+        }
+        break;
+      case ActionType::ABILITY_WARRIOR_THROW_WARRIOR:
+        if(abilitySrcPiece->type == P1_WARRIOR) {
+          opponentPlayer = Player::PLAYER_2;
+        } else {
+          opponentPlayer = Player::PLAYER_1;
+        }
+        direction = GameCache::srcSquareToDstSquareToDirection[srcIdx][dstIdx];
+        directionLine = &GameCache::squareToDirectionToLine[srcIdx][direction];
+        idx = (*directionLine)[0]; // warrior to be thrown is at this index
+        undoInfo.t1 = idx;
+        undoInfo.affectedPieces.push_back(board[idx]);
+
+        abilityDstPiece->healthPoints -= WARRIOR_THROW_DAMAGE_1;
+        undoInfo.affectedPieces.push_back(abilityDstPiece);
+
+        // throw warrior
+        board[dstIdx] = board[idx];
+        board[dstIdx]->squareIndex = dstIdx;
+        board[idx] = new Piece(PieceType::NO_PIECE, 0, idx);
+
+        // AOE damage
+        squares = &GameCache::squareToNeighboringSquares[dstIdx];
+        for(int i = 0; i < squares->size(); i++) {
+          currentPiece = board[(*squares)[i]];
+          if(pieceBelongsToPlayer(currentPiece->type, opponentPlayer)) {
+            currentPiece->healthPoints -= WARRIOR_THROW_DAMAGE_2;
+            undoInfo.affectedPieces.push_back(currentPiece);
+            if(currentPiece->healthPoints <= 0) {
+              board[currentPiece->squareIndex] = new Piece(PieceType::NO_PIECE, 0, currentPiece->squareIndex);
+            }
+          }
+        }
+        break;
+      case ActionType::ABILITY_KNIGHT_DAMAGE:
+        abilityDstPiece->healthPoints -= KNIGHT_ABILITY_POINTS;
+        undoInfo.affectedPieces.push_back(abilityDstPiece);
+        if(abilityDstPiece->healthPoints <= 0) {
+          // move piece to the destroyed piece's location
+          this->board[dstIdx] = abilitySrcPiece;
+          this->board[srcIdx] = new Piece(PieceType::NO_PIECE, 0, srcIdx);
+          abilitySrcPiece->squareIndex = dstIdx;
         }
         break;
     }
-  } else {
-    undoInfo.abilityType = AbilityType::NO_ABILITY;
   } 
   this->moveNumber += 1;
   this->currentPlayer = ~currentPlayer;
+
+  long int zh = zobristHash();
+  auto it = repetitions.find(zh);
+  if(it != repetitions.end()) {
+    if(it->second == 2) {
+      repetitionsDraw = true;
+    }
+    repetitions[zh] = it->second + 1;
+  } else {
+    repetitions.insert({zh, 1});
+  }
   return undoInfo;
 }
 
 void Game::undoAction(UndoInfo undoInfo) {
-  // undo ability
-  switch(undoInfo.abilityType) {
-    Piece* affectedPiece;
-    case KING_DAMAGE:
+  long int zh = zobristHash();
+  auto it = repetitions.find(zh);
+  if(it == repetitions.end()) {
+    throw std::runtime_error("Attempted to undo position that's not in the repetitions map.");
+  } else {
+    if(it->second == 3) {
+      repetitionsDraw = false;
+    }
+    repetitions[zh] = it->second - 1;
+  }
+
+  int srcIdx = undoInfo.action.srcIdx;
+  int dstIdx = undoInfo.action.dstIdx;
+  Piece *affectedPiece, *currentPiece;
+  std::vector<Piece*> *pieces;
+  std::vector<Piece*>::iterator position;
+  switch(undoInfo.action.actionType) {
+    case ActionType::MOVE_REGULAR:
+      undoMove(undoInfo.action);
+      break;
+    case ActionType::MOVE_CASTLE:
+      undoMove(undoInfo.action);
+      break;
+    case ActionType::MOVE_PROMOTE_P1_PAWN:
+      delete board[srcIdx];
+      board[srcIdx] = board[dstIdx];
+      board[srcIdx]->squareIndex = srcIdx;
+      board[srcIdx]->type = PieceType::P1_PAWN;
+      board[srcIdx]->healthPoints = undoInfo.t1;
+      board[dstIdx] = new Piece(PieceType::NO_PIECE, 0, dstIdx);
+      break;
+    case ActionType::MOVE_PROMOTE_P2_PAWN:
+      delete board[srcIdx];
+      board[srcIdx] = board[dstIdx];
+      board[srcIdx]->squareIndex = srcIdx;
+      board[srcIdx]->type = PieceType::P2_PAWN;
+      board[srcIdx]->healthPoints = undoInfo.t1;
+      board[dstIdx] = new Piece(PieceType::NO_PIECE, 0, dstIdx);
+      break;
+    case ActionType::ABILITY_KING_DAMAGE:
       affectedPiece = undoInfo.affectedPieces[0];
       affectedPiece->healthPoints += KING_ABILITY_POINTS;
+      if(this->board[affectedPiece->squareIndex] != affectedPiece) {
+        // Piece was destroyed.
+        // Move king to previous location
+        delete this->board[srcIdx];
+        this->board[srcIdx] = this->board[dstIdx];
+        this->board[srcIdx]->squareIndex = srcIdx;
+        this->board[dstIdx] = affectedPiece;
+      }
       if(this->board[affectedPiece->squareIndex]->type == PieceType::NO_PIECE) {
         delete this->board[affectedPiece->squareIndex];
       }
       this->board[affectedPiece->squareIndex] = affectedPiece;
       break;
-    case MAGE_DAMAGE:
-      for(int i = 0; i < 9; i++){ // 1 attacked square and 8 neighboring
+    case ActionType::ABILITY_MAGE_DAMAGE:
+      affectedPiece = undoInfo.affectedPieces[0];
+      affectedPiece->healthPoints += MAGE_ABILITY_POINTS;
+      if(this->board[affectedPiece->squareIndex] != affectedPiece) {
+        // Piece was destroyed.
+        // Move mage to previous location
+        delete this->board[srcIdx];
+        this->board[srcIdx] = this->board[dstIdx];
+        this->board[srcIdx]->squareIndex = srcIdx;
+        this->board[dstIdx] = affectedPiece;
+      } else if(undoInfo.t1 != -1) {
+        // undo leap
+        delete board[srcIdx];
+        board[srcIdx] = board[undoInfo.t1];
+        board[srcIdx]->squareIndex = srcIdx;
+        board[undoInfo.t1] = new Piece(PieceType::NO_PIECE, 0, undoInfo.t1);
+      }
+      break;
+    case ActionType::ABILITY_MAGE_THROW_ASSASSIN:
+      affectedPiece = undoInfo.affectedPieces[0];  // thrown assassin is always at 0th index.
+      affectedPiece->squareIndex = undoInfo.t1;
+      // This is always true, but if someone were to change the rules so that throws don't always
+      // destroy the enemy piece, things would break without this check.
+      // TODO: Find other places where it's assumed that a piece will be destroyed and add similar checks.
+      if(this->board[affectedPiece->squareIndex]->type == PieceType::NO_PIECE) {
+        delete this->board[affectedPiece->squareIndex];
+      }
+      this->board[affectedPiece->squareIndex] = affectedPiece;
+
+      affectedPiece = undoInfo.affectedPieces[1];  // destroyed piece is always at 1st index
+      affectedPiece->healthPoints += MAGE_THROW_DAMAGE_1;
+      this->board[affectedPiece->squareIndex] = affectedPiece;
+
+      // AOE
+      for(int i = 2; i < undoInfo.affectedPieces.size(); i++) {
         affectedPiece = undoInfo.affectedPieces[i];
-        if(affectedPiece == nullptr) continue;
-        affectedPiece->healthPoints += MAGE_ABILITY_POINTS;
+        affectedPiece->healthPoints += MAGE_THROW_DAMAGE_2;
         if(this->board[affectedPiece->squareIndex]->type == PieceType::NO_PIECE) {
           delete this->board[affectedPiece->squareIndex];
         }
         this->board[affectedPiece->squareIndex] = affectedPiece;
       }
       break;
-    case WARRIOR_DAMAGE:
+    case ActionType::ABILITY_WARRIOR_DAMAGE:
       affectedPiece = undoInfo.affectedPieces[0];
       affectedPiece->healthPoints += WARRIOR_ABILITY_POINTS;
-      if(this->board[affectedPiece->squareIndex]->type == PieceType::NO_PIECE) {
-        delete this->board[affectedPiece->squareIndex];
+      if(this->board[affectedPiece->squareIndex] != affectedPiece) {
+        // Piece was destroyed.
+        // Move warrior to previous location
+        delete this->board[srcIdx];
+        this->board[srcIdx] = this->board[dstIdx];
+        this->board[srcIdx]->squareIndex = srcIdx;
+        this->board[dstIdx] = affectedPiece;
+      } else if(undoInfo.t1 != -1) {
+        // undo leap
+        delete board[srcIdx];
+        board[srcIdx] = board[undoInfo.t1];
+        board[srcIdx]->squareIndex = srcIdx;
+        board[undoInfo.t1] = new Piece(PieceType::NO_PIECE, 0, undoInfo.t1);
       }
-      this->board[affectedPiece->squareIndex] = affectedPiece;
       break;
-    case ASSASSIN_DAMAGE:
+    case ActionType::ABILITY_ASSASSIN_DAMAGE:
       affectedPiece = undoInfo.affectedPieces[0];
       affectedPiece->healthPoints += ASSASSIN_ABILITY_POINTS;
+      if(this->board[affectedPiece->squareIndex] != affectedPiece) {
+        // Piece was destroyed.
+        // Move assassin to previous location
+        delete this->board[srcIdx];
+        this->board[srcIdx] = this->board[dstIdx];
+        this->board[srcIdx]->squareIndex = srcIdx;
+        this->board[dstIdx] = affectedPiece;
+      } else if(undoInfo.t1 != -1) {
+        // undo leap
+        delete board[srcIdx];
+        board[srcIdx] = board[undoInfo.t1];
+        board[srcIdx]->squareIndex = srcIdx;
+        board[undoInfo.t1] = new Piece(PieceType::NO_PIECE, 0, undoInfo.t1);
+      }
+      break;
+    case ActionType::ABILITY_WARRIOR_THROW_WARRIOR:
+      affectedPiece = undoInfo.affectedPieces[0];  // thrown warrior is always at 0th index.
+      affectedPiece->squareIndex = undoInfo.t1;
+      // This is always true, but if someone were to change the rules so that throws don't always
+      // destroy the enemy piece, things would break without this check.
+      // TODO: Find other places where it's assumed that a piece will be destroyed and add similar checks.
+      if(this->board[affectedPiece->squareIndex]->type == PieceType::NO_PIECE) {
+        delete this->board[affectedPiece->squareIndex];
+      }
+      this->board[affectedPiece->squareIndex] = affectedPiece;
+
+      affectedPiece = undoInfo.affectedPieces[1];  // destroyed piece is always at 1st index
+      affectedPiece->healthPoints += WARRIOR_THROW_DAMAGE_1;
+      this->board[affectedPiece->squareIndex] = affectedPiece;
+
+      // AOE
+      for(int i = 2; i < undoInfo.affectedPieces.size(); i++) {
+        affectedPiece = undoInfo.affectedPieces[i];
+        affectedPiece->healthPoints += WARRIOR_THROW_DAMAGE_2;
+        if(this->board[affectedPiece->squareIndex]->type == PieceType::NO_PIECE) {
+          delete this->board[affectedPiece->squareIndex];
+        }
+        this->board[affectedPiece->squareIndex] = affectedPiece;
+      }
+      break;
+    case ActionType::ABILITY_KNIGHT_DAMAGE:
+      affectedPiece = undoInfo.affectedPieces[0];
+      affectedPiece->healthPoints += KNIGHT_ABILITY_POINTS;
+      if(this->board[affectedPiece->squareIndex] != affectedPiece) {
+        // Piece was destroyed.
+        // Move knight to previous location
+        delete this->board[srcIdx];
+        this->board[srcIdx] = this->board[dstIdx];
+        this->board[srcIdx]->squareIndex = srcIdx;
+        this->board[dstIdx] = affectedPiece;
+      }
       if(this->board[affectedPiece->squareIndex]->type == PieceType::NO_PIECE) {
         delete this->board[affectedPiece->squareIndex];
       }
       this->board[affectedPiece->squareIndex] = affectedPiece;
       break;
-    case PAWN_DAMAGE:
+    case ActionType::ABILITY_PAWN_DAMAGE:
       affectedPiece = undoInfo.affectedPieces[0];
       affectedPiece->healthPoints += PAWN_ABILITY_POINTS;
+      if(this->board[affectedPiece->squareIndex] != affectedPiece) {
+        // Piece was destroyed.
+        // Move pawn to previous location
+        delete this->board[srcIdx];
+        this->board[srcIdx] = this->board[dstIdx];
+        this->board[srcIdx]->squareIndex = srcIdx;
+        this->board[dstIdx] = affectedPiece;
+      }
       if(this->board[affectedPiece->squareIndex]->type == PieceType::NO_PIECE) {
         delete this->board[affectedPiece->squareIndex];
       }
       this->board[affectedPiece->squareIndex] = affectedPiece;
       break;
-    case NO_ABILITY:
+    case ActionType::ABILITY_P1_PAWN_DAMAGE_AND_PROMOTION:
+      // transform warrior -> pawn and move back
+      delete board[srcIdx];
+      board[srcIdx] = board[dstIdx];
+      board[srcIdx]->squareIndex = srcIdx;
+      board[srcIdx]->healthPoints = undoInfo.t1;
+      board[srcIdx]->type = PieceType::P1_PAWN;
+
+      // restore captured piece
+      affectedPiece = undoInfo.affectedPieces[0];
+      affectedPiece->healthPoints += PAWN_ABILITY_POINTS;
+      board[dstIdx] = affectedPiece;
+      break;
+    case ActionType::ABILITY_P2_PAWN_DAMAGE_AND_PROMOTION:
+      // transform warrior -> pawn and move back
+      delete board[srcIdx];
+      board[srcIdx] = board[dstIdx];
+      board[srcIdx]->squareIndex = srcIdx;
+      board[srcIdx]->healthPoints = undoInfo.t1;
+      board[srcIdx]->type = PieceType::P2_PAWN;
+
+      // restore captured piece
+      affectedPiece = undoInfo.affectedPieces[0];
+      affectedPiece->healthPoints += PAWN_ABILITY_POINTS;
+      board[dstIdx] = affectedPiece;
+      break;
+    case ActionType::SKIP:
       break;
     default:
       break;
-  }
-  // undo move
-  if(undoInfo.moveSrcIdx != MOVE_SKIP) {
-    undoMove(undoInfo.moveSrcIdx, undoInfo.moveDstIdx);
   }
   this->moveNumber -= 1;
   this->currentPlayer = ~currentPlayer;
@@ -587,1230 +951,919 @@ std::string Game::dump() const {
   return retval;
 }
 
-void Game::makeMove(int moveSrcIdx, int moveDstIdx) {
-  delete board[moveDstIdx];
-  board[moveDstIdx] = board[moveSrcIdx];
-  board[moveDstIdx]->squareIndex = moveDstIdx;
-  board[moveSrcIdx] = new Piece(PieceType::NO_PIECE, 0, moveSrcIdx);
-  return;
-}
-
 /*
  * Since move is being reverted, goal here is to move from "destination" to "source".
  */
-void Game::undoMove(int moveSrcIdx, int moveDstIdx) {
-  delete board[moveSrcIdx];
-  board[moveSrcIdx] = board[moveDstIdx];
-  board[moveSrcIdx]->squareIndex = moveSrcIdx;
-  board[moveDstIdx] = new Piece(PieceType::NO_PIECE, 0, moveDstIdx);
-  return;
-}
-
-/*
- * Assumes that the game is not over.
- */
-std::vector<PlayerMove> Game::legalMovesByPiece(int srcSquareIdx) {
-  std::vector<PlayerMove> retval;
-  Piece* piece = board[srcSquareIdx];
-  if((!pieceBelongsToPlayer(piece->type, currentPlayer)) ||
-      piece->healthPoints <= 0) {
-    return retval;
-  }
-  auto legalMovesOnEmptyBoard = gameCache->pieceTypeToSquareIndexToLegalMoves[piece->type][piece->squareIndex];
-  for(int i = 0; i < legalMovesOnEmptyBoard.size(); i++) {
-    if(board[legalMovesOnEmptyBoard[i].moveDstIdx]->type != NO_PIECE) continue;
-    retval.push_back(legalMovesOnEmptyBoard[i]);
-  }
-  return retval;
-}
-
-/*
- * Assumes that the game is not over.
- * Useful abilities are those that change the game state.
- * For example, warrior attacking an empty square is legal but doesn't change the game state.
- */
-std::vector<PlayerAbility> Game::usefulLegalAbilitiesByPiece(int srcSquareIdx) {
-  std::vector<PlayerAbility> retval;
-  Piece* piece = board[srcSquareIdx];
-  if((!pieceBelongsToPlayer(piece->type, currentPlayer)) ||
-      piece->healthPoints <= 0) {
-    return retval;
-  }
-  auto legalAbilitiesOnEmptyBoard = gameCache->pieceTypeToSquareIndexToLegalAbilities[piece->type][piece->squareIndex];
-  for(int l = 0; l < legalAbilitiesOnEmptyBoard.size(); l++) {
-    PlayerAbility currentAbility = legalAbilitiesOnEmptyBoard[l];
-    Piece* destinationSquarePiece = board[currentAbility.abilityDstIdx];
-    // exclude useless abilities, e.g. warrior attacking empty square
-    switch(piece->type) {
-      // king can only use abilities on enemy pieces
-      case P1_KING:
-        switch(destinationSquarePiece->type) {
-          case P1_KING:
-            continue;
-          case P1_MAGE:
-            continue;
-          case P1_PAWN:
-            continue;
-          case P1_WARRIOR:
-            continue;
-          case P1_ASSASSIN:
-            continue;
-          case P2_KING:
-            break;
-          case P2_MAGE:
-            break;
-          case P2_PAWN:
-            break;
-          case P2_WARRIOR:
-            break;
-          case P2_ASSASSIN:
-            break;
-          case NO_PIECE:
-            continue;
-          default:
-            break;
-        }
-      // mage can only use abilities on enemy pieces
-      case P1_MAGE:
-        switch(destinationSquarePiece->type) {
-          case P1_KING:
-            continue;
-          case P1_MAGE:
-            continue;
-          case P1_PAWN:
-            continue;
-          case P1_WARRIOR:
-            continue;
-          case P1_ASSASSIN:
-            continue;
-          case P2_KING:
-            break;
-          case P2_MAGE:
-            break;
-          case P2_PAWN:
-            break;
-          case P2_WARRIOR:
-            break;
-          case P2_ASSASSIN:
-            break;
-          case NO_PIECE:
-            continue;
-          default:
-            break;
-        }
-        break;
-      // pawn can only use abilities on enemy pieces
-      case P1_PAWN:
-        switch(destinationSquarePiece->type) {
-          case P1_KING:
-            continue;
-          case P1_MAGE:
-            continue;
-          case P1_PAWN:
-            continue;
-          case P1_WARRIOR:
-            continue;
-          case P1_ASSASSIN:
-            continue;
-          case P2_KING:
-            break;
-          case P2_MAGE:
-            break;
-          case P2_PAWN:
-            break;
-          case P2_WARRIOR:
-            break;
-          case P2_ASSASSIN:
-            break;
-          case NO_PIECE:
-            continue;
-          default:
-            break;
-        }
-        break;
-      // warrior can only use abilities on enemy pieces
-      case P1_WARRIOR:
-        switch(destinationSquarePiece->type) {
-          case P1_KING:
-            continue;
-          case P1_MAGE:
-            continue;
-          case P1_PAWN:
-            continue;
-          case P1_WARRIOR:
-            continue;
-          case P1_ASSASSIN:
-            continue;
-          case P2_KING:
-            break;
-          case P2_MAGE:
-            break;
-          case P2_PAWN:
-            break;
-          case P2_WARRIOR:
-            break;
-          case P2_ASSASSIN:
-            break;
-          case NO_PIECE:
-            continue;
-          default:
-            break;
-        }
-        break;
-      // assassin can only use abilities on enemy pieces
-      case P1_ASSASSIN:
-        switch(destinationSquarePiece->type) {
-          case P1_KING:
-            continue;
-          case P1_MAGE:
-            continue;
-          case P1_PAWN:
-            continue;
-          case P1_WARRIOR:
-            continue;
-          case P1_ASSASSIN:
-            continue;
-          case P2_KING:
-            break;
-          case P2_MAGE:
-            break;
-          case P2_PAWN:
-            break;
-          case P2_WARRIOR:
-            break;
-          case P2_ASSASSIN:
-            break;
-          case NO_PIECE:
-            continue;
-          default:
-            break;
-        }
-        break;
-
-      // king can only use abilities on enemy pieces
-      case P2_KING:
-        switch(destinationSquarePiece->type) {
-          case P1_KING:
-            break;
-          case P1_MAGE:
-            break;
-          case P1_PAWN:
-            break;
-          case P1_WARRIOR:
-            break;
-          case P1_ASSASSIN:
-            break;
-          case P2_KING:
-            continue;
-          case P2_MAGE:
-            continue;
-          case P2_PAWN:
-            continue;
-          case P2_WARRIOR:
-            continue;
-          case P2_ASSASSIN:
-            continue;
-          case NO_PIECE:
-            continue;
-          default:
-            break;
-        }
-      // mage can only use abilities on enemy pieces
-      case P2_MAGE:
-        switch(destinationSquarePiece->type) {
-          case P1_KING:
-            break;
-          case P1_MAGE:
-            break;
-          case P1_PAWN:
-            break;
-          case P1_WARRIOR:
-            break;
-          case P1_ASSASSIN:
-            break;
-          case P2_KING:
-            continue;
-          case P2_MAGE:
-            continue;
-          case P2_PAWN:
-            continue;
-          case P2_WARRIOR:
-            continue;
-          case P2_ASSASSIN:
-            continue;
-          case NO_PIECE:
-            continue;
-          default:
-            break;
-        }
-        break;
-      // pawn can only use abilities on enemy pieces
-      case P2_PAWN:
-        switch(destinationSquarePiece->type) {
-          case P1_KING:
-            break;
-          case P1_MAGE:
-            break;
-          case P1_PAWN:
-            break;
-          case P1_WARRIOR:
-            break;
-          case P1_ASSASSIN:
-            break;
-          case P2_KING:
-            continue;
-          case P2_MAGE:
-            continue;
-          case P2_PAWN:
-            continue;
-          case P2_WARRIOR:
-            continue;
-          case P2_ASSASSIN:
-            continue;
-          case NO_PIECE:
-            continue;
-          default:
-            break;
-        }
-        break;
-      // warrior can only use abilities on enemy pieces
-      case P2_WARRIOR:
-        switch(destinationSquarePiece->type) {
-          case P1_KING:
-            break;
-          case P1_MAGE:
-            break;
-          case P1_PAWN:
-            break;
-          case P1_WARRIOR:
-            break;
-          case P1_ASSASSIN:
-            break;
-          case P2_KING:
-            continue;
-          case P2_MAGE:
-            continue;
-          case P2_PAWN:
-            continue;
-          case P2_WARRIOR:
-            continue;
-          case P2_ASSASSIN:
-            continue;
-          case NO_PIECE:
-            continue;
-          default:
-            break;
-        }
-        break;
-      // assassin can only use abilities on enemy pieces
-      case P2_ASSASSIN:
-        switch(destinationSquarePiece->type) {
-          case P1_KING:
-            break;
-          case P1_MAGE:
-            break;
-          case P1_PAWN:
-            break;
-          case P1_WARRIOR:
-            break;
-          case P1_ASSASSIN:
-            break;
-          case P2_KING:
-            continue;
-          case P2_MAGE:
-            continue;
-          case P2_PAWN:
-            continue;
-          case P2_WARRIOR:
-            continue;
-          case P2_ASSASSIN:
-            continue;
-          case NO_PIECE:
-            continue;
-          default:
-            break;
-        }
-        break;
-      case NO_PIECE:
-        break;
-      default:
-        break;
+void Game::undoMove(PlayerAction action) {
+  if(action.actionType == ActionType::MOVE_REGULAR) {
+    delete board[action.srcIdx];
+    board[action.srcIdx] = board[action.dstIdx];
+    board[action.srcIdx]->squareIndex = action.srcIdx;
+    board[action.dstIdx] = new Piece(PieceType::NO_PIECE, 0, action.dstIdx);
+  } else { // castle
+    // move king back
+    delete board[action.srcIdx];
+    board[action.srcIdx] = this->board[action.dstIdx];
+    board[action.srcIdx]->squareIndex = action.srcIdx;
+    board[action.dstIdx] = new Piece(PieceType::NO_PIECE, 0, action.dstIdx);
+    // move warrior back
+    if(action.dstIdx == 6) {
+      // p1 short castle
+      delete board[7];
+      board[7] = board[5];
+      board[7]->squareIndex = 7;
+      board[5] = new Piece(PieceType::NO_PIECE, 0, 5);
+    } else if(action.dstIdx == 2) {
+       // p1 long castle
+      delete board[0];
+      board[0] = this->board[3];
+      board[0]->squareIndex = 0;
+      board[3] = new Piece(PieceType::NO_PIECE, 0, 3);
+     } else if(action.dstIdx == 62) {
+      // p2 short castle
+      delete board[63];
+      board[63] = this->board[61];
+      board[63]->squareIndex = 63;
+      board[61] = new Piece(PieceType::NO_PIECE, 0, 61);
+     } else if(action.dstIdx == 58) {
+      // p2 long castle
+      delete board[56];
+      board[56] = this->board[59];
+      board[56]->squareIndex = 56;
+      board[59] = new Piece(PieceType::NO_PIECE, 0, 59);
     }
-    retval.push_back(currentAbility);
   }
-  return retval;
 }
 
-/*
- * Assumes that the game is not over.
- */
-std::vector<PlayerAbility> Game::allLegalAbilitiesByPiece(int srcSquareIdx) {
-  std::vector<PlayerAbility> retval;
-  Piece* piece = board[srcSquareIdx];
-  if((!pieceBelongsToPlayer(piece->type, currentPlayer)) ||
-      piece->healthPoints <= 0) {
-    return retval;
-  }
-  auto legalAbilitiesOnAnEmptyBoard = gameCache->pieceTypeToSquareIndexToLegalAbilities[piece->type][piece->squareIndex];
-
-  for(PlayerAbility pa: legalAbilitiesOnAnEmptyBoard) {
-    Piece* abilityDstPiece = board[pa.abilityDstIdx];
-    if(pieceBelongsToPlayer(abilityDstPiece->type, currentPlayer)) continue;
-    retval.push_back(pa);
-  }
-  return retval;
-}
-
-/*
- * Useful actions are those whose abilities change the game state.
- * For example, warrior attacking an empty square is legal but doesn't change the game state.
- */
-std::vector<PlayerAction> Game::usefulLegalActions() {
+std::vector<PlayerAction> Game::_p1PawnActions(Piece* piece) {
   std::vector<PlayerAction> retval;
-  // If King is dead, game is over and there are no legal actions
-  if(playerToPieces[currentPlayer][KING_PIECE_INDEX]->healthPoints <= 0) {
+  int squareIdx;
+  const std::vector<int> *moveSquares = &GameCache::squareToP1PawnMoveSquares[piece->squareIndex];
+  for(int i = 0; i < moveSquares->size(); i++) {
+    squareIdx = (*moveSquares)[i];
+    if(board[squareIdx]->type != NO_PIECE) continue;
+    if(squareIdx > 55) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_PROMOTE_P1_PAWN));
+      continue;
+    }
+    // Is p1 pawn trying to jump over another piece?
+    if(piece->squareIndex - squareIdx == -2 * NUM_COLUMNS ) {
+      // checks whether the square in front of the p1 pawn is empty
+      if(board[piece->squareIndex + NUM_COLUMNS]->type != NO_PIECE) continue;
+    }
+    retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+  }
+
+  const std::vector<int> *abilitySquares = &GameCache::squareToP1PawnAbilitySquares[piece->squareIndex];
+  for(int i = 0; i < abilitySquares->size(); i++) {
+    squareIdx = (*abilitySquares)[i];
+    Piece* destinationSquarePiece = board[squareIdx];
+    if(pieceBelongsToPlayer(destinationSquarePiece->type, Player::PLAYER_2)) {
+      if(squareIdx > 55 && PAWN_ABILITY_POINTS >= destinationSquarePiece->healthPoints) {
+        retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_P1_PAWN_DAMAGE_AND_PROMOTION));
+      } else {
+        retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_PAWN_DAMAGE));
+      }
+    }
+  }
+  return retval;
+}
+
+std::vector<PlayerAction> Game::_p2PawnActions(Piece* piece) {
+  std::vector<PlayerAction> retval;
+  int squareIdx;
+  const std::vector<int> *moveSquares = &GameCache::squareToP2PawnMoveSquares[piece->squareIndex];
+  for(int i = 0; i < moveSquares->size(); i++) {
+    squareIdx = (*moveSquares)[i];
+    if(board[squareIdx]->type != NO_PIECE) continue;
+    if(squareIdx < 8) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_PROMOTE_P2_PAWN));
+      continue;
+    }
+    // Is p2 pawn trying to jump over another piece?
+    if(piece->squareIndex - squareIdx == 2 * NUM_COLUMNS ) {
+      // checks whether square in front of the p2 pawn is empty
+      if(board[piece->squareIndex - NUM_COLUMNS]->type != NO_PIECE) continue;
+    }
+    retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+  }
+
+  const std::vector<int> *abilitySquares = &GameCache::squareToP2PawnAbilitySquares[piece->squareIndex];
+  for(int i = 0; i < abilitySquares->size(); i++) {
+    squareIdx = (*abilitySquares)[i];
+    Piece* destinationSquarePiece = board[squareIdx];
+    if(pieceBelongsToPlayer(destinationSquarePiece->type, Player::PLAYER_1)) {
+      if(squareIdx < 8 && PAWN_ABILITY_POINTS >= destinationSquarePiece->healthPoints) {
+        retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_P2_PAWN_DAMAGE_AND_PROMOTION));
+      } else {
+        retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_PAWN_DAMAGE));
+      }
+    }
+  }
+  return retval;
+}
+
+std::vector<PlayerAction> Game::_p1KingActions(Piece* piece) {
+  std::vector<PlayerAction> retval;
+  const std::vector<int> *squares = &GameCache::squareToNeighboringSquares[piece->squareIndex];
+  for(int i = 0; i < squares->size(); i++) {
+    int squareIdx = (*squares)[i];
+    if(board[squareIdx]->type == NO_PIECE)  {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(board[squareIdx]->type, Player::PLAYER_2)) {
+        retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_KING_DAMAGE));
+    }
+  }
+
+  if(piece->squareIndex == 4) {
+    // short castle
+    if(
+      board[5]->type == PieceType::NO_PIECE &&
+      board[6]->type == PieceType::NO_PIECE &&
+      board[7]->type == PieceType::P1_WARRIOR
+      ) {
+      retval.push_back(PlayerAction(4, 6, ActionType::MOVE_CASTLE));
+    }
+    // long castle
+    if(
+      board[3]->type == PieceType::NO_PIECE &&
+      board[2]->type == PieceType::NO_PIECE &&
+      board[1]->type == PieceType::NO_PIECE &&
+      board[0]->type == PieceType::P1_WARRIOR
+      ) {
+      retval.push_back(PlayerAction(4, 2, ActionType::MOVE_CASTLE));
+    }
+  }
+
+  return retval;
+}
+
+std::vector<PlayerAction> Game::_p2KingActions(Piece* piece) {
+  std::vector<PlayerAction> retval;
+  const std::vector<int> *squares = &GameCache::squareToNeighboringSquares[piece->squareIndex];
+  for(int i = 0; i < squares->size(); i++) {
+    int squareIdx = (*squares)[i];
+    if(board[squareIdx]->type == NO_PIECE)  {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(board[squareIdx]->type, Player::PLAYER_1)) {
+        retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_KING_DAMAGE));
+    }
+  }
+  if(piece->squareIndex == 60) {
+    // short castle
+    if(
+      board[61]->type == PieceType::NO_PIECE &&
+      board[62]->type == PieceType::NO_PIECE &&
+      board[63]->type == PieceType::P2_WARRIOR
+      ) {
+      retval.push_back(PlayerAction(60, 62, ActionType::MOVE_CASTLE));
+    }
+    // long castle
+    if(
+      board[59]->type == PieceType::NO_PIECE &&
+      board[58]->type == PieceType::NO_PIECE &&
+      board[57]->type == PieceType::NO_PIECE &&
+      board[56]->type == PieceType::P2_WARRIOR
+      ) {
+      retval.push_back(PlayerAction(60, 58, ActionType::MOVE_CASTLE));
+    }
+  }
+
+  return retval;
+}
+
+std::vector<PlayerAction> Game::_p1MageActions(Piece* piece) {
+  std::vector<PlayerAction> retval;
+  int squareIdx;
+
+  const std::vector<int> *vertical1 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::NORTH];
+  for(int i = 0; i < vertical1->size(); i++) {
+    squareIdx = (*vertical1)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_MAGE_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *diagonal1 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::NORTHEAST];
+  for(int i = 0; i < diagonal1->size(); i++) {
+    squareIdx = (*diagonal1)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_MAGE_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *horizontal1 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::EAST];
+  for(int i = 0; i < horizontal1->size(); i++) {
+    squareIdx = (*horizontal1)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_MAGE_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *diagonal2 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::SOUTHEAST];
+  for(int i = 0; i < diagonal2->size(); i++) {
+    squareIdx = (*diagonal2)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_MAGE_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *vertical2 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::SOUTH];
+  for(int i = 0; i < vertical2->size(); i++) {
+    squareIdx = (*vertical2)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_MAGE_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *diagonal3 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::SOUTHWEST];
+  for(int i = 0; i < diagonal3->size(); i++) {
+    squareIdx = (*diagonal3)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_MAGE_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *horizontal2 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::WEST];
+  for(int i = 0; i < horizontal2->size(); i++) {
+    squareIdx = (*horizontal2)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_MAGE_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *diagonal4 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::NORTHWEST];
+  for(int i = 0; i < diagonal4->size(); i++) {
+    squareIdx = (*diagonal4)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_MAGE_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  // mage throw assassin
+  for(int k = 0; k < NUM_DIAGONAL_DIRECTIONS; k++) {
+    const std::vector<int> *directionLine = &GameCache::squareToDirectionToLine[piece->squareIndex][DIAGONAL_DIRECTIONS[k]];
+    for(int i = 0; i < directionLine->size(); i++) {
+      Piece* p = board[(*directionLine)[i]];
+      if(p->type != PieceType::P1_ASSASSIN) {
+        break;
+      } else {
+        // is there a valid target?
+        for(int j = i+1; j < directionLine->size(); j++) {
+          Piece* p2 = board[(*directionLine)[j]];
+          if(pieceBelongsToPlayer(p2->type, Player::PLAYER_2)) {
+            PlayerAction currentAbility = PlayerAction(piece->squareIndex, p2->squareIndex, ActionType::ABILITY_MAGE_THROW_ASSASSIN);
+            retval.push_back(currentAbility);
+            break;
+          } else if(pieceBelongsToPlayer(p2->type, Player::PLAYER_1)) {
+            break;
+          }
+        }
+      }
+      break;
+    }
+  }
+  return retval;
+}
+
+std::vector<PlayerAction> Game::_p2MageActions(Piece* piece) {
+  std::vector<PlayerAction> retval;
+  int squareIdx;
+
+  const std::vector<int> *vertical1 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::NORTH];
+  for(int i = 0; i < vertical1->size(); i++) {
+    squareIdx = (*vertical1)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_MAGE_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *diagonal1 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::NORTHEAST];
+  for(int i = 0; i < diagonal1->size(); i++) {
+    squareIdx = (*diagonal1)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_MAGE_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *horizontal1 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::EAST];
+  for(int i = 0; i < horizontal1->size(); i++) {
+    squareIdx = (*horizontal1)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_MAGE_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *diagonal2 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::SOUTHEAST];
+  for(int i = 0; i < diagonal2->size(); i++) {
+    squareIdx = (*diagonal2)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_MAGE_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *vertical2 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::SOUTH];
+  for(int i = 0; i < vertical2->size(); i++) {
+    squareIdx = (*vertical2)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_MAGE_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *diagonal3 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::SOUTHWEST];
+  for(int i = 0; i < diagonal3->size(); i++) {
+    squareIdx = (*diagonal3)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_MAGE_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *horizontal2 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::WEST];
+  for(int i = 0; i < horizontal2->size(); i++) {
+    squareIdx = (*horizontal2)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_MAGE_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *diagonal4 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::NORTHWEST];
+  for(int i = 0; i < diagonal4->size(); i++) {
+    squareIdx = (*diagonal4)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_MAGE_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  // mage throw assassin
+  for(int k = 0; k < NUM_DIAGONAL_DIRECTIONS; k++) {
+    const std::vector<int> *directionLine = &GameCache::squareToDirectionToLine[piece->squareIndex][DIAGONAL_DIRECTIONS[k]];
+    for(int i = 0; i < directionLine->size(); i++) {
+      Piece* p = board[(*directionLine)[i]];
+      if(p->type != PieceType::P2_ASSASSIN) {
+        break;
+      } else {
+        // is there a valid target?
+        for(int j = i+1; j < directionLine->size(); j++) {
+          Piece* p2 = board[(*directionLine)[j]];
+          if(pieceBelongsToPlayer(p2->type, Player::PLAYER_1)) {
+            PlayerAction currentAbility = PlayerAction(piece->squareIndex, p2->squareIndex, ActionType::ABILITY_MAGE_THROW_ASSASSIN);
+            retval.push_back(currentAbility);
+            break;
+          } else if(pieceBelongsToPlayer(p2->type, Player::PLAYER_2)) {
+            break;
+          }
+        }
+      }
+      break;
+    }
+  }
+
+  return retval;
+}
+
+std::vector<PlayerAction> Game::_p1WarriorActions(Piece* piece) {
+  std::vector<PlayerAction> retval;
+  // moves
+  int squareIdx;
+
+  const std::vector<int> *vertical1 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::NORTH];
+  for(int i = 0; i < vertical1->size(); i++) {
+    squareIdx = (*vertical1)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_WARRIOR_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *horizontal1 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::EAST];
+  for(int i = 0; i < horizontal1->size(); i++) {
+    squareIdx = (*horizontal1)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_WARRIOR_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *vertical2 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::SOUTH];
+  for(int i = 0; i < vertical2->size(); i++) {
+    squareIdx = (*vertical2)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_WARRIOR_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *horizontal2 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::WEST];
+  for(int i = 0; i < horizontal2->size(); i++) {
+    squareIdx = (*horizontal2)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_WARRIOR_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  // warrior throw warrior
+  for(int k = 0; k < 4; k++) {
+    const std::vector<int> *directionLine = &GameCache::squareToDirectionToLine[piece->squareIndex][NON_DIAGONAL_DIRECTIONS[k]];
+    for(int i = 0; i < directionLine->size(); i++) {
+      Piece* p = board[(*directionLine)[i]];
+      if(p->type != PieceType::P1_WARRIOR) {
+        break;
+      } else {
+        // is there a valid target?
+        for(int j = i+1; j < directionLine->size(); j++) {
+          Piece* p2 = board[(*directionLine)[j]];
+          if(pieceBelongsToPlayer(p2->type, Player::PLAYER_2)) {
+            PlayerAction currentAbility = PlayerAction(piece->squareIndex, p2->squareIndex, ActionType::ABILITY_WARRIOR_THROW_WARRIOR);
+            retval.push_back(currentAbility);
+            break;
+          } else if(pieceBelongsToPlayer(p2->type, Player::PLAYER_1)) {
+            break;
+          }
+        }
+      }
+      break;
+    }
+  }
+  return retval;
+}
+
+std::vector<PlayerAction> Game::_p2WarriorActions(Piece* piece) {
+  std::vector<PlayerAction> retval;
+  int squareIdx;
+
+  const std::vector<int> *vertical1 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::NORTH];
+  for(int i = 0; i < vertical1->size(); i++) {
+    squareIdx = (*vertical1)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_WARRIOR_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *horizontal1 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::EAST];
+  for(int i = 0; i < horizontal1->size(); i++) {
+    squareIdx = (*horizontal1)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_WARRIOR_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *vertical2 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::SOUTH];
+  for(int i = 0; i < vertical2->size(); i++) {
+    squareIdx = (*vertical2)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_WARRIOR_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *horizontal2 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::WEST];
+  for(int i = 0; i < horizontal2->size(); i++) {
+    squareIdx = (*horizontal2)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_WARRIOR_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  // warrior throw warrior
+  for(int k = 0; k < 4; k++) {
+    const std::vector<int> *directionLine = &GameCache::squareToDirectionToLine[piece->squareIndex][NON_DIAGONAL_DIRECTIONS[k]];
+    for(int i = 0; i < directionLine->size(); i++) {
+      Piece* p = board[(*directionLine)[i]];
+      if(p->type != PieceType::P2_WARRIOR) {
+        break;
+      } else {
+        // is there a valid target?
+        for(int j = i+1; j < directionLine->size(); j++) {
+          Piece* p2 = board[(*directionLine)[j]];
+          if(pieceBelongsToPlayer(p2->type, Player::PLAYER_1)) {
+            PlayerAction currentAbility = PlayerAction(piece->squareIndex, p2->squareIndex, ActionType::ABILITY_WARRIOR_THROW_WARRIOR);
+            retval.push_back(currentAbility);
+            break;
+          } else if(pieceBelongsToPlayer(p2->type, Player::PLAYER_2)) {
+            break;
+          }
+        }
+      }
+      break;
+    }
+  }
+  return retval;
+}
+
+
+std::vector<PlayerAction> Game::_p1KnightActions(Piece* piece) {
+  std::vector<PlayerAction> retval;
+  const std::vector<int> *squares = &GameCache::squareToKnightActionSquares[piece->squareIndex];
+  for(int i = 0; i < squares->size(); i++) {
+    int s = (*squares)[i];
+    Piece* currentPiece = board[s];
+    if(currentPiece->type == NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, s, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(currentPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, s, ActionType::ABILITY_KNIGHT_DAMAGE));
+    }
+  }
+  return retval;
+}
+
+std::vector<PlayerAction> Game::_p2KnightActions(Piece* piece) {
+  std::vector<PlayerAction> retval;
+  const std::vector<int> *squares = &GameCache::squareToKnightActionSquares[piece->squareIndex];
+  for(int i = 0; i < squares->size(); i++) {
+    int s = (*squares)[i];
+    Piece* currentPiece = board[s];
+    if(currentPiece->type == NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, s, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(currentPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, s, ActionType::ABILITY_KNIGHT_DAMAGE));
+    }
+  }
+  return retval;
+}
+
+std::vector<PlayerAction> Game::_p1AssassinActions(Piece* piece) {
+  std::vector<PlayerAction> retval;
+  int squareIdx;
+
+  const std::vector<int> *squares = &GameCache::squareToNeighboringNonDiagonalSquares[piece->squareIndex];
+  for(int i = 0; i < squares->size(); i++) {
+    squareIdx = (*squares)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_ASSASSIN_DAMAGE));
+      continue;
+    } else {
+      continue;
+    }
+  }
+
+  const std::vector<int> *diagonal1 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::NORTHEAST];
+  for(int i = 0; i < diagonal1->size(); i++) {
+    squareIdx = (*diagonal1)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_ASSASSIN_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *diagonal2 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::SOUTHEAST];
+  for(int i = 0; i < diagonal2->size(); i++) {
+    squareIdx = (*diagonal2)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_ASSASSIN_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *diagonal3 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::SOUTHWEST];
+  for(int i = 0; i < diagonal3->size(); i++) {
+    squareIdx = (*diagonal3)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_ASSASSIN_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *diagonal4 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::NORTHWEST];
+  for(int i = 0; i < diagonal4->size(); i++) {
+    squareIdx = (*diagonal4)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_2)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_ASSASSIN_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+  return retval;
+}
+
+std::vector<PlayerAction> Game::_p2AssassinActions(Piece* piece) {
+  std::vector<PlayerAction> retval;
+  int squareIdx;
+
+  const std::vector<int> *squares = &GameCache::squareToNeighboringNonDiagonalSquares[piece->squareIndex];
+  for(int i = 0; i < squares->size(); i++) {
+    squareIdx = (*squares)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_ASSASSIN_DAMAGE));
+      continue;
+    } else {
+      continue;
+    }
+  }
+
+  const std::vector<int> *diagonal1 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::NORTHEAST];
+  for(int i = 0; i < diagonal1->size(); i++) {
+    squareIdx = (*diagonal1)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_ASSASSIN_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *diagonal2 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::SOUTHEAST];
+  for(int i = 0; i < diagonal2->size(); i++) {
+    squareIdx = (*diagonal2)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_ASSASSIN_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *diagonal3 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::SOUTHWEST];
+  for(int i = 0; i < diagonal3->size(); i++) {
+    squareIdx = (*diagonal3)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_ASSASSIN_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const std::vector<int> *diagonal4 = &GameCache::squareToDirectionToLine[piece->squareIndex][Direction::NORTHWEST];
+  for(int i = 0; i < diagonal4->size(); i++) {
+    squareIdx = (*diagonal4)[i];
+    Piece *dstPiece = board[squareIdx];
+    if(dstPiece->type == PieceType::NO_PIECE) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::MOVE_REGULAR));
+    } else if(pieceBelongsToPlayer(dstPiece->type, Player::PLAYER_1)) {
+      retval.push_back(PlayerAction(piece->squareIndex, squareIdx, ActionType::ABILITY_ASSASSIN_DAMAGE));
+      break;
+    } else {
+      break;
+    }
+  }
+  return retval;
+}
+
+std::vector<PlayerAction> Game::legalActionsByPiece(Piece* piece) {
+  switch(piece->type) {
+    case P1_KING:
+      return _p1KingActions(piece);
+    case P1_MAGE:
+      return _p1MageActions(piece);
+    case P1_PAWN:
+      return _p1PawnActions(piece);
+    case P1_WARRIOR:
+      return _p1WarriorActions(piece);
+    case P1_ASSASSIN:
+      return _p1AssassinActions(piece);
+    case P1_KNIGHT:
+      return _p1KnightActions(piece);
+    case P2_KING:
+      return _p2KingActions(piece);
+    case P2_MAGE:
+      return _p2MageActions(piece);
+    case P2_PAWN:
+      return _p2PawnActions(piece);
+    case P2_WARRIOR:
+      return _p2WarriorActions(piece);
+    case P2_ASSASSIN:
+      return _p2AssassinActions(piece);
+    case P2_KNIGHT:
+      return _p2KnightActions(piece);
+    default:
+      return std::vector<PlayerAction>();
+  }
+}
+
+std::vector<PlayerAction> Game::generateLegalActions() {
+  std::vector<PlayerAction> retval;
+  if(playerToKing[currentPlayer]->healthPoints <= 0) {
     return retval;
   }
-  for(int i = 0; i < NUM_STARTING_PIECES; i++) {
-    Piece* currentPiece = playerToPieces[currentPlayer][i];
+  std::vector<Piece*> currentPlayerPieces = playerToPieces[currentPlayer];
+  for(int i = 0; i < currentPlayerPieces.size(); i++) {
+    Piece* currentPiece = currentPlayerPieces[i];
     if(currentPiece->healthPoints <= 0) continue; // dead pieces don't move
 
-    auto legalMoves = gameCache->pieceTypeToSquareIndexToLegalMoves[currentPiece->type][currentPiece->squareIndex];
-    for(int j = 0; j < legalMoves.size(); j++) {
-      PlayerMove currentMove = legalMoves[j];
-      // Is p1 pawn trying to jump over another piece?
-      if(currentPiece->type == P1_PAWN &&
-          currentPiece->squareIndex - currentMove.moveDstIdx == -2 * NUM_COLUMNS 
-          ) {
-        // checks whether square in front of the p1 pawn is empty
-        if(board[currentPiece->squareIndex + NUM_COLUMNS]->type != NO_PIECE) continue;
-      }
-      // Is p2 pawn trying to jump over another piece?
-      if(currentPiece->type == P2_PAWN &&
-          currentPiece->squareIndex - currentMove.moveDstIdx == 2 * NUM_COLUMNS 
-          ) {
-        // checks whether square in front of the p2 pawn is empty
-        if(board[currentPiece->squareIndex - NUM_COLUMNS]->type != NO_PIECE) continue;
-      }
-
-      if(board[currentMove.moveDstIdx]->type != NO_PIECE) continue;
-      makeMove(currentMove.moveSrcIdx, currentMove.moveDstIdx);
-      for(int k = 0; k < NUM_STARTING_PIECES; k++) {
-        Piece* cp2 = playerToPieces[currentPlayer][k];
-        if(cp2->healthPoints <= 0) continue; // no abilities for dead pieces
-        auto legalAbilities = gameCache->pieceTypeToSquareIndexToLegalAbilities[cp2->type][cp2->squareIndex];
-        for(int l = 0; l < legalAbilities.size(); l++) {
-          PlayerAbility currentAbility = legalAbilities[l];
-          Piece* destinationSquarePiece = board[currentAbility.abilityDstIdx];
-          // exclude useless abilities, e.g. warrior attacking empty square
-          switch(cp2->type) {
-            // king can only use abilities on enemy pieces
-            case P1_KING:
-              switch(destinationSquarePiece->type) {
-                case P1_KING:
-                  continue;
-                case P1_MAGE:
-                  continue;
-                case P1_PAWN:
-                  continue;
-                case P1_WARRIOR:
-                  continue;
-                case P1_ASSASSIN:
-                  continue;
-                case P2_KING:
-                  break;
-                case P2_MAGE:
-                  break;
-                case P2_PAWN:
-                  break;
-                case P2_WARRIOR:
-                  break;
-                case P2_ASSASSIN:
-                  break;
-                case NO_PIECE:
-                  continue;
-                default:
-                  break;
-              }
-            // mage can only use abilities on enemy pieces
-            case P1_MAGE:
-              switch(destinationSquarePiece->type) {
-                case P1_KING:
-                  continue;
-                case P1_MAGE:
-                  continue;
-                case P1_PAWN:
-                  continue;
-                case P1_WARRIOR:
-                  continue;
-                case P1_ASSASSIN:
-                  continue;
-                case P2_KING:
-                  break;
-                case P2_MAGE:
-                  break;
-                case P2_PAWN:
-                  break;
-                case P2_WARRIOR:
-                  break;
-                case P2_ASSASSIN:
-                  break;
-                case NO_PIECE:
-                  continue;
-                default:
-                  break;
-              }
-              break;
-            // pawn can only use abilities on enemy pieces
-            case P1_PAWN:
-              switch(destinationSquarePiece->type) {
-                case P1_KING:
-                  continue;
-                case P1_MAGE:
-                  continue;
-                case P1_PAWN:
-                  continue;
-                case P1_WARRIOR:
-                  continue;
-                case P1_ASSASSIN:
-                  continue;
-                case P2_KING:
-                  break;
-                case P2_MAGE:
-                  break;
-                case P2_PAWN:
-                  break;
-                case P2_WARRIOR:
-                  break;
-                case P2_ASSASSIN:
-                  break;
-                case NO_PIECE:
-                  continue;
-                default:
-                  break;
-              }
-              break;
-            // warrior can only use abilities on enemy pieces
-            case P1_WARRIOR:
-              switch(destinationSquarePiece->type) {
-                case P1_KING:
-                  continue;
-                case P1_MAGE:
-                  continue;
-                case P1_PAWN:
-                  continue;
-                case P1_WARRIOR:
-                  continue;
-                case P1_ASSASSIN:
-                  continue;
-                case P2_KING:
-                  break;
-                case P2_MAGE:
-                  break;
-                case P2_PAWN:
-                  break;
-                case P2_WARRIOR:
-                  break;
-                case P2_ASSASSIN:
-                  break;
-                case NO_PIECE:
-                  continue;
-                default:
-                  break;
-              }
-              break;
-            // assassin can only use abilities on enemy pieces
-            case P1_ASSASSIN:
-              switch(destinationSquarePiece->type) {
-                case P1_KING:
-                  continue;
-                case P1_MAGE:
-                  continue;
-                case P1_PAWN:
-                  continue;
-                case P1_WARRIOR:
-                  continue;
-                case P1_ASSASSIN:
-                  continue;
-                case P2_KING:
-                  break;
-                case P2_MAGE:
-                  break;
-                case P2_PAWN:
-                  break;
-                case P2_WARRIOR:
-                  break;
-                case P2_ASSASSIN:
-                  break;
-                case NO_PIECE:
-                  continue;
-                default:
-                  break;
-              }
-              break;
-
-            // king can only use abilities on enemy pieces
-            case P2_KING:
-              switch(destinationSquarePiece->type) {
-                case P1_KING:
-                  break;
-                case P1_MAGE:
-                  break;
-                case P1_PAWN:
-                  break;
-                case P1_WARRIOR:
-                  break;
-                case P1_ASSASSIN:
-                  break;
-                case P2_KING:
-                  continue;
-                case P2_MAGE:
-                  continue;
-                case P2_PAWN:
-                  continue;
-                case P2_WARRIOR:
-                  continue;
-                case P2_ASSASSIN:
-                  continue;
-                case NO_PIECE:
-                  continue;
-                default:
-                  break;
-              }
-            // mage can only use abilities on enemy pieces
-            case P2_MAGE:
-              switch(destinationSquarePiece->type) {
-                case P1_KING:
-                  break;
-                case P1_MAGE:
-                  break;
-                case P1_PAWN:
-                  break;
-                case P1_WARRIOR:
-                  break;
-                case P1_ASSASSIN:
-                  break;
-                case P2_KING:
-                  continue;
-                case P2_MAGE:
-                  continue;
-                case P2_PAWN:
-                  continue;
-                case P2_WARRIOR:
-                  continue;
-                case P2_ASSASSIN:
-                  continue;
-                case NO_PIECE:
-                  continue;
-                default:
-                  break;
-              }
-              break;
-            // pawn can only use abilities on enemy pieces
-            case P2_PAWN:
-              switch(destinationSquarePiece->type) {
-                case P1_KING:
-                  break;
-                case P1_MAGE:
-                  break;
-                case P1_PAWN:
-                  break;
-                case P1_WARRIOR:
-                  break;
-                case P1_ASSASSIN:
-                  break;
-                case P2_KING:
-                  continue;
-                case P2_MAGE:
-                  continue;
-                case P2_PAWN:
-                  continue;
-                case P2_WARRIOR:
-                  continue;
-                case P2_ASSASSIN:
-                  continue;
-                case NO_PIECE:
-                  continue;
-                default:
-                  break;
-              }
-              break;
-            // warrior can only use abilities on enemy pieces
-            case P2_WARRIOR:
-              switch(destinationSquarePiece->type) {
-                case P1_KING:
-                  break;
-                case P1_MAGE:
-                  break;
-                case P1_PAWN:
-                  break;
-                case P1_WARRIOR:
-                  break;
-                case P1_ASSASSIN:
-                  break;
-                case P2_KING:
-                  continue;
-                case P2_MAGE:
-                  continue;
-                case P2_PAWN:
-                  continue;
-                case P2_WARRIOR:
-                  continue;
-                case P2_ASSASSIN:
-                  continue;
-                case NO_PIECE:
-                  continue;
-                default:
-                  break;
-              }
-              break;
-            // assassin can only use abilities on enemy pieces
-            case P2_ASSASSIN:
-              switch(destinationSquarePiece->type) {
-                case P1_KING:
-                  break;
-                case P1_MAGE:
-                  break;
-                case P1_PAWN:
-                  break;
-                case P1_WARRIOR:
-                  break;
-                case P1_ASSASSIN:
-                  break;
-                case P2_KING:
-                  continue;
-                case P2_MAGE:
-                  continue;
-                case P2_PAWN:
-                  continue;
-                case P2_WARRIOR:
-                  continue;
-                case P2_ASSASSIN:
-                  continue;
-                case NO_PIECE:
-                  continue;
-                default:
-                  break;
-              }
-              break;
-            case NO_PIECE:
-              break;
-            default:
-              break;
-          }
-          PlayerAction p = PlayerAction(currentMove.moveSrcIdx, currentMove.moveDstIdx, currentAbility.abilitySrcIdx, currentAbility.abilityDstIdx);
-          retval.push_back(p);
-        }
-      }
-      // player can skip the ability
-      PlayerAction p = PlayerAction(currentMove.moveSrcIdx, currentMove.moveDstIdx, ABILITY_SKIP, ABILITY_SKIP);
-      retval.push_back(p);
-
-      undoMove(currentMove.moveSrcIdx, currentMove.moveDstIdx);
-    }
+    auto legalActions = legalActionsByPiece(currentPiece);
+    retval.insert(retval.end(), legalActions.begin(), legalActions.end());
   }
-  // player can skip the move
-  for(int k = 0; k < NUM_STARTING_PIECES; k++) {
-    Piece* cp2 = playerToPieces[currentPlayer][k];
-    if(cp2->healthPoints <= 0) continue; // no abilities for dead pieces
-    auto legalAbilities = gameCache->pieceTypeToSquareIndexToLegalAbilities[cp2->type][cp2->squareIndex];
-    for(int l = 0; l < legalAbilities.size(); l++) {
-      Piece* destinationSquarePiece = board[legalAbilities[l].abilityDstIdx];
-      // exclude useless abilities
-      switch(cp2->type) {
-        // king can only use abilities on enemy pieces
-        case P1_KING:
-          switch(destinationSquarePiece->type) {
-            case P1_KING:
-              continue;
-            case P1_MAGE:
-              continue;
-            case P1_PAWN:
-              continue;
-            case P1_WARRIOR:
-              continue;
-            case P1_ASSASSIN:
-              continue;
-            case P2_KING:
-              break;
-            case P2_MAGE:
-              break;
-            case P2_PAWN:
-              break;
-            case P2_WARRIOR:
-              break;
-            case P2_ASSASSIN:
-              break;
-            case NO_PIECE:
-              continue;
-            default:
-              break;
-          }
-        // mage can only use abilities on enemy pieces
-        case P1_MAGE:
-          switch(destinationSquarePiece->type) {
-            case P1_KING:
-              continue;
-            case P1_MAGE:
-              continue;
-            case P1_PAWN:
-              continue;
-            case P1_WARRIOR:
-              continue;
-            case P1_ASSASSIN:
-              continue;
-            case P2_KING:
-              break;
-            case P2_MAGE:
-              break;
-            case P2_PAWN:
-              break;
-            case P2_WARRIOR:
-              break;
-            case P2_ASSASSIN:
-              break;
-            case NO_PIECE:
-              continue;
-            default:
-              break;
-          }
-          break;
-        // pawn can only use abilities on enemy pieces
-        case P1_PAWN:
-          switch(destinationSquarePiece->type) {
-            case P1_KING:
-              continue;
-            case P1_MAGE:
-              continue;
-            case P1_PAWN:
-              continue;
-            case P1_WARRIOR:
-              continue;
-            case P1_ASSASSIN:
-              continue;
-            case P2_KING:
-              break;
-            case P2_MAGE:
-              break;
-            case P2_PAWN:
-              break;
-            case P2_WARRIOR:
-              break;
-            case P2_ASSASSIN:
-              break;
-            case NO_PIECE:
-              continue;
-            default:
-              break;
-          }
-          break;
-        // warrior can only use abilities on enemy pieces
-        case P1_WARRIOR:
-          switch(destinationSquarePiece->type) {
-            case P1_KING:
-              continue;
-            case P1_MAGE:
-              continue;
-            case P1_PAWN:
-              continue;
-            case P1_WARRIOR:
-              continue;
-            case P1_ASSASSIN:
-              continue;
-            case P2_KING:
-              break;
-            case P2_MAGE:
-              break;
-            case P2_PAWN:
-              break;
-            case P2_WARRIOR:
-              break;
-            case P2_ASSASSIN:
-              break;
-            case NO_PIECE:
-              continue;
-            default:
-              break;
-          }
-          break;
-        // assassin can only use abilities on enemy pieces
-        case P1_ASSASSIN:
-          switch(destinationSquarePiece->type) {
-            case P1_KING:
-              continue;
-            case P1_MAGE:
-              continue;
-            case P1_PAWN:
-              continue;
-            case P1_WARRIOR:
-              continue;
-            case P1_ASSASSIN:
-              continue;
-            case P2_KING:
-              break;
-            case P2_MAGE:
-              break;
-            case P2_PAWN:
-              break;
-            case P2_WARRIOR:
-              break;
-            case P2_ASSASSIN:
-              break;
-            case NO_PIECE:
-              continue;
-            default:
-              break;
-          }
-          break;
 
-        // king can only use abilities on enemy pieces
-        case P2_KING:
-          switch(destinationSquarePiece->type) {
-            case P1_KING:
-              break;
-            case P1_MAGE:
-              break;
-            case P1_PAWN:
-              break;
-            case P1_WARRIOR:
-              break;
-            case P1_ASSASSIN:
-              break;
-            case P2_KING:
-              continue;
-            case P2_MAGE:
-              continue;
-            case P2_PAWN:
-              continue;
-            case P2_WARRIOR:
-              continue;
-            case P2_ASSASSIN:
-              continue;
-            case NO_PIECE:
-              continue;
-            default:
-              break;
-          }
-        // mage can only use abilities on enemy pieces
-        case P2_MAGE:
-          switch(destinationSquarePiece->type) {
-            case P1_KING:
-              break;
-            case P1_MAGE:
-              break;
-            case P1_PAWN:
-              break;
-            case P1_WARRIOR:
-              break;
-            case P1_ASSASSIN:
-              break;
-            case P2_KING:
-              continue;
-            case P2_MAGE:
-              continue;
-            case P2_PAWN:
-              continue;
-            case P2_WARRIOR:
-              continue;
-            case P2_ASSASSIN:
-              continue;
-            case NO_PIECE:
-              continue;
-            default:
-              break;
-          }
-          break;
-        // pawn can only use abilities on enemy pieces
-        case P2_PAWN:
-          switch(destinationSquarePiece->type) {
-            case P1_KING:
-              break;
-            case P1_MAGE:
-              break;
-            case P1_PAWN:
-              break;
-            case P1_WARRIOR:
-              break;
-            case P1_ASSASSIN:
-              break;
-            case P2_KING:
-              continue;
-            case P2_MAGE:
-              continue;
-            case P2_PAWN:
-              continue;
-            case P2_WARRIOR:
-              continue;
-            case P2_ASSASSIN:
-              continue;
-            case NO_PIECE:
-              continue;
-            default:
-              break;
-          }
-          break;
-        // warrior can only use abilities on enemy pieces
-        case P2_WARRIOR:
-          switch(destinationSquarePiece->type) {
-            case P1_KING:
-              break;
-            case P1_MAGE:
-              break;
-            case P1_PAWN:
-              break;
-            case P1_WARRIOR:
-              break;
-            case P1_ASSASSIN:
-              break;
-            case P2_KING:
-              continue;
-            case P2_MAGE:
-              continue;
-            case P2_PAWN:
-              continue;
-            case P2_WARRIOR:
-              continue;
-            case P2_ASSASSIN:
-              continue;
-            case NO_PIECE:
-              continue;
-            default:
-              break;
-          }
-          break;
-        // assassin can only use abilities on enemy pieces
-        case P2_ASSASSIN:
-          switch(destinationSquarePiece->type) {
-            case P1_KING:
-              break;
-            case P1_MAGE:
-              break;
-            case P1_PAWN:
-              break;
-            case P1_WARRIOR:
-              break;
-            case P1_ASSASSIN:
-              break;
-            case P2_KING:
-              continue;
-            case P2_MAGE:
-              continue;
-            case P2_PAWN:
-              continue;
-            case P2_WARRIOR:
-              continue;
-            case P2_ASSASSIN:
-              continue;
-            case NO_PIECE:
-              continue;
-            default:
-              break;
-          }
-          break;
-        case NO_PIECE:
-          break;
-        default:
-          break;
-      }
-
-      PlayerAction p = PlayerAction(MOVE_SKIP, MOVE_SKIP, legalAbilities[l].abilitySrcIdx, legalAbilities[l].abilityDstIdx);
-      retval.push_back(p);
-    }
-  }
-  // player can skip both move and ability
-  PlayerAction p = PlayerAction(MOVE_SKIP, MOVE_SKIP, ABILITY_SKIP, ABILITY_SKIP);
-  retval.push_back(p);
+  // TODO: No longer needed. Remove?
+  // player can also skip the action
+  //PlayerAction p = PlayerAction(ACTION_SKIP, ACTION_SKIP, ActionType::SKIP);
+  //retval.push_back(p);
   return retval;
 }
 
-/*
- * Includes actions with useless abilities (i.e. those that don't alter the game state)
- */
-std::vector<PlayerAction> Game::allLegalActions() {
-  std::vector<PlayerAction> retval;
-  // If King is dead, game is over and there are no legal actions
-  if(playerToPieces[currentPlayer][KING_PIECE_INDEX]->healthPoints <= 0) {
-    return retval;
-  }
-  for(int i = 0; i < NUM_STARTING_PIECES; i++) {
-    Piece* currentPiece = playerToPieces[currentPlayer][i];
-    if(currentPiece->healthPoints <= 0) continue; // dead pieces don't move
-
-    auto legalMoves = gameCache->pieceTypeToSquareIndexToLegalMoves[currentPiece->type][currentPiece->squareIndex];
-    for(int j = 0; j < legalMoves.size(); j++) {
-      PlayerMove currentMove = legalMoves[j];
-      // Is p1 pawn trying to jump over another piece?
-      if(currentPiece->type == P1_PAWN &&
-          currentPiece->squareIndex - currentMove.moveDstIdx == -2 * NUM_COLUMNS 
-          ) {
-        // checks whether square in front of the p1 pawn is empty
-        if(board[currentPiece->squareIndex + NUM_COLUMNS]->type != NO_PIECE) continue;
-      }
-      // Is p2 pawn trying to jump over another piece?
-      if(currentPiece->type == P2_PAWN &&
-          currentPiece->squareIndex - currentMove.moveDstIdx == 2 * NUM_COLUMNS 
-          ) {
-        // checks whether square in front of the p2 pawn is empty
-        if(board[currentPiece->squareIndex - NUM_COLUMNS]->type != NO_PIECE) continue;
-      }
-
-      if(board[currentMove.moveDstIdx]->type != NO_PIECE) continue;
-      makeMove(currentMove.moveSrcIdx, currentMove.moveDstIdx);
-      for(int k = 0; k < NUM_STARTING_PIECES; k++) {
-        Piece* cp2 = playerToPieces[currentPlayer][k];
-        if(cp2->healthPoints <= 0) continue; // no abilities for dead pieces
-        auto legalAbilities = gameCache->pieceTypeToSquareIndexToLegalAbilities[cp2->type][cp2->squareIndex];
-        for(int l = 0; l < legalAbilities.size(); l++) {
-          PlayerAbility currentAbility = legalAbilities[l];
-          Piece* destinationSquarePiece = board[currentAbility.abilityDstIdx];
-          if(pieceBelongsToPlayer(destinationSquarePiece->type, this->currentPlayer)) continue;
-
-          PlayerAction p = PlayerAction(currentMove.moveSrcIdx, currentMove.moveDstIdx, currentAbility.abilitySrcIdx, currentAbility.abilityDstIdx);
-          retval.push_back(p);
-        }
-      }
-      // player can skip the ability
-      PlayerAction p = PlayerAction(currentMove.moveSrcIdx, currentMove.moveDstIdx, ABILITY_SKIP, ABILITY_SKIP);
-      retval.push_back(p);
-
-      undoMove(currentMove.moveSrcIdx, currentMove.moveDstIdx);
+long int Game::zobristHash() {
+    long int hash = 0;
+    std::vector<Piece*> p1Pieces = playerToPieces[Player::PLAYER_1];
+    for(int i = 0; i < p1Pieces.size(); i++) {
+      Piece* currentPiece = p1Pieces[i];
+      if(currentPiece->healthPoints <= 0) continue;
+      // dividing hp by 10 because health points are { 10, 20, 30, 40, 50, 60 } and 
+      // indexes are { 1, 2, 3, 4, 5, 6 }
+      hash ^= Zobrist::pieceTypeToSquareToHPToKey[currentPiece->type][currentPiece->squareIndex][currentPiece->healthPoints/10];
     }
-  }
-  // player can skip the move
-  for(int k = 0; k < NUM_STARTING_PIECES; k++) {
-    Piece* cp2 = playerToPieces[currentPlayer][k];
-    if(cp2->healthPoints <= 0) continue; // no abilities for dead pieces
-    auto legalAbilities = gameCache->pieceTypeToSquareIndexToLegalAbilities[cp2->type][cp2->squareIndex];
-    for(int l = 0; l < legalAbilities.size(); l++) {
-      Piece* destinationSquarePiece = board[legalAbilities[l].abilityDstIdx];
-      if(pieceBelongsToPlayer(destinationSquarePiece->type, this->currentPlayer)) continue;
-      PlayerAction p = PlayerAction(MOVE_SKIP, MOVE_SKIP, legalAbilities[l].abilitySrcIdx, legalAbilities[l].abilityDstIdx);
-      retval.push_back(p);
+    std::vector<Piece*> p2Pieces = playerToPieces[Player::PLAYER_2];
+    for(int i = 0; i < p2Pieces.size(); i++) {
+      Piece* currentPiece = p2Pieces[i];
+      if(currentPiece->healthPoints <= 0) continue;
+      // dividing hp by 10 because health points are { 10, 20, 30, 40, 50, 60 } and 
+      // indexes are { 1, 2, 3, 4, 5, 6 }
+      hash ^= Zobrist::pieceTypeToSquareToHPToKey[currentPiece->type][currentPiece->squareIndex][currentPiece->healthPoints/10];
     }
-  }
-  // player can skip both move and ability
-  PlayerAction p = PlayerAction(MOVE_SKIP, MOVE_SKIP, ABILITY_SKIP, ABILITY_SKIP);
-  retval.push_back(p);
-  return retval;
+    if(currentPlayer == Player::PLAYER_2) {
+      hash ^= Zobrist::p2Key;
+    }
+    return hash;
 }
 
 /*
  * Checks whether values are in the right range.
  */
-bool isActionValid(int moveSrcIdx, int moveDstIdx, int abilitySrcIdx, int abilityDstIdx) {
-  bool moveValid = false;
-  bool abilityValid = false;
-  if(moveSrcIdx == MOVE_SKIP && moveDstIdx == MOVE_SKIP) {
-    moveValid = true;
-  } else if((!isOffBoard(moveSrcIdx)) && (!isOffBoard(moveDstIdx))) {
-    moveValid = true;
+bool isActionValid(int srcIdx, int dstIdx) {
+  if(srcIdx == ACTION_SKIP && dstIdx == ACTION_SKIP) {
+    return true;
+  } else if((!isOffBoard(srcIdx)) && (!isOffBoard(dstIdx))) {
+    return true;
   }
-  if(abilitySrcIdx == ABILITY_SKIP && abilityDstIdx == ABILITY_SKIP) {
-    abilityValid = true;
-  } else if((!isOffBoard(abilitySrcIdx)) && (!isOffBoard(abilityDstIdx))) {
-    abilityValid = true;
-  }
-  return moveValid && abilityValid;
+  return false;
 }
 
-bool Game::isActionLegal(int moveSrcIdx, int moveDstIdx, int abilitySrcIdx, int abilityDstIdx) {
-  // It's important for this method to not have many exit points because it's altering the game
-  // state. If a return statement is between makeMove and undoMove, game state will remain changed
-  // which shouldn't happen in a method that checks action legality.
-  bool validInput = isActionValid(moveSrcIdx, moveDstIdx, abilitySrcIdx, abilityDstIdx);
-  if(!validInput) return false;
-
-  bool moveLegal = false;
-  bool abilityLegal = false;
-  bool movePieceBelongsToCurrentPlayerOrMoveSkip = false;
-  bool abilityPieceBelongsToCurrentPlayerOrAbilitySkip = false;
-  bool movePieceIsAliveOrMoveSkip = false;
-  bool abilityPieceIsAliveOrAbilitySkip = false;
-  bool abilityDstPieceBelongsToCurrentPlayer = false; // are you trying to attack your own piece?
-  bool currentPlayersKingIsAlive = false;
-  Piece* movePiece;
-  Piece* abilityPiece;
-  Piece* abilityDstPiece;
-
-  if(moveSrcIdx == MOVE_SKIP && moveDstIdx == MOVE_SKIP) {
-    moveLegal = true;
-    movePieceBelongsToCurrentPlayerOrMoveSkip = true;
-    movePieceIsAliveOrMoveSkip = true;
-  } else {
-    movePiece = board[moveSrcIdx];
-    if(pieceBelongsToPlayer(movePiece->type, currentPlayer)) {
-      movePieceBelongsToCurrentPlayerOrMoveSkip = true;
-    }
-    if(movePiece->healthPoints > 0) {
-      movePieceIsAliveOrMoveSkip = true;
-    }
-    auto legalMovesOnEmptyBoard = gameCache->pieceTypeToSquareIndexToLegalMoves[movePiece->type][movePiece->squareIndex];
-    for(int i = 0; i < legalMovesOnEmptyBoard.size(); i++) {
-      PlayerMove currentMove = legalMovesOnEmptyBoard[i];
-      // Is p1 pawn trying to jump over another piece?
-      if(movePiece->type == P1_PAWN &&
-          movePiece->squareIndex - currentMove.moveDstIdx == -2 * NUM_COLUMNS 
-          ) {
-        // checks whether square in front of the p1 pawn is empty
-        if(board[movePiece->squareIndex + NUM_COLUMNS]->type != NO_PIECE) continue;
-      }
-
-      // Is p2 pawn trying to jump over another piece?
-      if(movePiece->type == P2_PAWN &&
-          movePiece->squareIndex - currentMove.moveDstIdx == 2 * NUM_COLUMNS 
-          ) {
-        // checks whether square in front of the p2 pawn is empty
-        if(board[movePiece->squareIndex - NUM_COLUMNS]->type != NO_PIECE) continue;
-      }
-
-      if(board[currentMove.moveDstIdx]->type == NO_PIECE && 
-          currentMove.moveDstIdx == moveDstIdx) {
-        moveLegal = true;
-        makeMove(moveSrcIdx, moveDstIdx);
-        break;
-      }
-    }
-  }
-  if(abilitySrcIdx == ABILITY_SKIP && abilityDstIdx == ABILITY_SKIP) {
-    abilityLegal = true;
-    abilityPieceBelongsToCurrentPlayerOrAbilitySkip = true;
-    abilityPieceIsAliveOrAbilitySkip = true;
-  } else {
-    abilityPiece = board[abilitySrcIdx];
-    abilityDstPiece = board[abilityDstIdx];
-    if(pieceBelongsToPlayer(abilityPiece->type, currentPlayer)) {
-      abilityPieceBelongsToCurrentPlayerOrAbilitySkip = true;
-    }
-    if(abilityPiece->healthPoints > 0) {
-      abilityPieceIsAliveOrAbilitySkip = true;
-    }
-    if(pieceBelongsToPlayer(abilityDstPiece->type, this->currentPlayer)) {
-      abilityDstPieceBelongsToCurrentPlayer = true;
-    }
-    auto legalAbilitiesOnEmptyBoard = gameCache->pieceTypeToSquareIndexToLegalAbilities[abilityPiece->type][abilityPiece->squareIndex];
-    for(int i = 0; i < legalAbilitiesOnEmptyBoard.size(); i++) {
-      PlayerAbility currentAbility = legalAbilitiesOnEmptyBoard[i];
-      if(currentAbility.abilityDstIdx == abilityDstIdx) {
-        abilityLegal = true;
-        break;
-      }
-    }
-  }
-
-  if(moveSrcIdx != MOVE_SKIP && moveLegal) {
-    undoMove(moveSrcIdx, moveDstIdx);
-  }
-
-  currentPlayersKingIsAlive = playerToPieces[currentPlayer][KING_PIECE_INDEX]->healthPoints > 0;
-  
-  if(moveLegal && abilityLegal && movePieceBelongsToCurrentPlayerOrMoveSkip &&
-      abilityPieceBelongsToCurrentPlayerOrAbilitySkip && movePieceIsAliveOrMoveSkip &&
-      abilityPieceIsAliveOrAbilitySkip && currentPlayersKingIsAlive &&
-      !(abilityDstPieceBelongsToCurrentPlayer)) {
-    return true;
-  } else {
-    return false;
-  }
+bool Game::isActionLegal(int srcIdx, int dstIdx) {
+  // TODO
+  return true;
 }
 
 Player Game::getCurrentPlayer() {
@@ -1825,10 +1878,10 @@ Piece Game::getPieceBySquareIndex(int squareIndex) {
   return *board[squareIndex]; 
 }
 
-bool Game::gameOver() {
-  Piece* p1King = playerToPieces[PLAYER_1][KING_PIECE_INDEX];
-  Piece* p2King = playerToPieces[PLAYER_2][KING_PIECE_INDEX];
-  if(p1King->healthPoints <= 0 || p2King->healthPoints <= 0) {
+bool Game::isGameOver() {
+  Piece* p1King = playerToKing[PLAYER_1];
+  Piece* p2King = playerToKing[PLAYER_2];
+  if(p1King->healthPoints <= 0 || p2King->healthPoints <= 0 || repetitionsDraw) {
     return true;
   } else {
     return false;
@@ -1836,8 +1889,8 @@ bool Game::gameOver() {
 }
 
 std::optional<Player> Game::winner() {
-  Piece* p1King = playerToPieces[PLAYER_1][KING_PIECE_INDEX];
-  Piece* p2King = playerToPieces[PLAYER_2][KING_PIECE_INDEX];
+  Piece* p1King = playerToKing[PLAYER_1];
+  Piece* p2King = playerToKing[PLAYER_2];
   if(p1King->healthPoints <= 0) {
     return PLAYER_2;
   } else if(p2King->healthPoints <= 0) {
@@ -1871,6 +1924,9 @@ std::string Game::boardToString() {
         case P1_ASSASSIN:
           retval << "0-assassin-";
           break;
+        case P1_KNIGHT:
+          retval << "0-knight-";
+          break;
         case P2_KING:
           retval << "1-king-";
           break;
@@ -1886,6 +1942,9 @@ std::string Game::boardToString() {
         case P2_ASSASSIN:
           retval << "1-assassin-";
           break;
+        case P2_KNIGHT:
+          retval << "1-knight-";
+          break;
       }        
       retval << currentPiece->healthPoints << ",";
     }
@@ -1896,29 +1955,8 @@ std::string Game::boardToString() {
 void Game::boardFromString(std::string encodedBoard) {
   currentPlayer = (Player)(std::stoi(encodedBoard.substr(0, encodedBoard.find("|"))));
   moveNumber = 0;
-  // pieces need to exist in the piece array even if they're dead
-  // first all pieces are initialized as dead, then they're replaced if found in the encodedBoard
-  std::vector<Piece*> p1Pieces(NUM_STARTING_PIECES);
-  p1Pieces[KING_PIECE_INDEX] = new Piece(PieceType::P1_KING, 0, 0);
-  p1Pieces[PAWN_1_PIECE_INDEX] = new Piece(PieceType::P1_PAWN, 0, 0);
-  p1Pieces[PAWN_2_PIECE_INDEX] = new Piece(PieceType::P1_PAWN, 0, 0);
-  p1Pieces[PAWN_3_PIECE_INDEX] = new Piece(PieceType::P1_PAWN, 0, 0);
-  p1Pieces[ASSASSIN_PIECE_INDEX] = new Piece(PieceType::P1_ASSASSIN, 0, 0);
-  p1Pieces[MAGE_PIECE_INDEX] = new Piece(PieceType::P1_MAGE, 0, 0);
-  p1Pieces[WARRIOR_PIECE_INDEX] = new Piece(PieceType::P1_WARRIOR, 0, 0);
-
-  p1King = p1Pieces[KING_PIECE_INDEX];
-
-  std::vector<Piece*> p2Pieces(NUM_STARTING_PIECES);
-  p2Pieces[KING_PIECE_INDEX] = new Piece(PieceType::P2_KING, 0, 0);
-  p2Pieces[PAWN_1_PIECE_INDEX] = new Piece(PieceType::P2_PAWN, 0, 0);
-  p2Pieces[PAWN_2_PIECE_INDEX] = new Piece(PieceType::P2_PAWN, 0, 0);
-  p2Pieces[PAWN_3_PIECE_INDEX] = new Piece(PieceType::P2_PAWN, 0, 0);
-  p2Pieces[ASSASSIN_PIECE_INDEX] = new Piece(PieceType::P2_ASSASSIN, 0, 0);
-  p2Pieces[MAGE_PIECE_INDEX] = new Piece(PieceType::P2_MAGE, 0, 0);
-  p2Pieces[WARRIOR_PIECE_INDEX] = new Piece(PieceType::P2_WARRIOR, 0, 0);
-
-  p2King = p2Pieces[KING_PIECE_INDEX];
+  std::vector<Piece*> p1Pieces;
+  std::vector<Piece*> p2Pieces;
 
   std::string b1 = encodedBoard.substr(2);
   std::string delimiter1 = ",";
@@ -1941,52 +1979,42 @@ void Game::boardFromString(std::string encodedBoard) {
       s = words[0] + words[1];
       if(s == "0king") {
         board[boardIdx] = new Piece(PieceType::P1_KING, healthPoints, boardIdx);
-        p1Pieces[KING_PIECE_INDEX] = board[boardIdx];
-        p1King = board[boardIdx];
+        p1Pieces.push_back(board[boardIdx]);
+        playerToKing[PLAYER_1] = board[boardIdx];
       } else if(s == "0pawn") {
         board[boardIdx] = new Piece(PieceType::P1_PAWN, healthPoints, boardIdx);
-        if(p1Pieces[PAWN_1_PIECE_INDEX]->healthPoints <= 0) {
-          p1Pieces[PAWN_1_PIECE_INDEX] = board[boardIdx];
-        } else if(p1Pieces[PAWN_2_PIECE_INDEX]->healthPoints <= 0) {
-          p1Pieces[PAWN_2_PIECE_INDEX] = board[boardIdx];
-        } else if(p1Pieces[PAWN_3_PIECE_INDEX]->healthPoints <= 0) {
-          p1Pieces[PAWN_3_PIECE_INDEX] = board[boardIdx];
-        } else {
-          throw "Already found 3 living PLAYER_1 Pawns";
-        }
+        p1Pieces.push_back(board[boardIdx]);
       } else if(s == "0mage") {
         board[boardIdx] = new Piece(PieceType::P1_MAGE, healthPoints, boardIdx);
-        p1Pieces[MAGE_PIECE_INDEX] = board[boardIdx];
+        p1Pieces.push_back(board[boardIdx]);
       } else if(s == "0assassin") {
         board[boardIdx] = new Piece(PieceType::P1_ASSASSIN, healthPoints, boardIdx);
-        p1Pieces[ASSASSIN_PIECE_INDEX] = board[boardIdx];
+        p1Pieces.push_back(board[boardIdx]);
+      } else if(s == "0knight") {
+        board[boardIdx] = new Piece(PieceType::P1_KNIGHT, healthPoints, boardIdx);
+        p1Pieces.push_back(board[boardIdx]);
       } else if(s == "0warrior") {
         board[boardIdx] = new Piece(PieceType::P1_WARRIOR, healthPoints, boardIdx);
-        p1Pieces[WARRIOR_PIECE_INDEX] = board[boardIdx];
+        p1Pieces.push_back(board[boardIdx]);
       } else if(s == "1king") {
         board[boardIdx] = new Piece(PieceType::P2_KING, healthPoints, boardIdx);
-        p2Pieces[KING_PIECE_INDEX] = board[boardIdx];
-        p2King = board[boardIdx];
+        p2Pieces.push_back(board[boardIdx]);
+        playerToKing[PLAYER_2] = board[boardIdx];
       } else if(s == "1pawn") {
         board[boardIdx] = new Piece(PieceType::P2_PAWN, healthPoints, boardIdx);
-        if(p2Pieces[PAWN_1_PIECE_INDEX]->healthPoints <= 0) {
-          p2Pieces[PAWN_1_PIECE_INDEX] = board[boardIdx];
-        } else if(p2Pieces[PAWN_2_PIECE_INDEX]->healthPoints <= 0) {
-          p2Pieces[PAWN_2_PIECE_INDEX] = board[boardIdx];
-        } else if(p2Pieces[PAWN_3_PIECE_INDEX]->healthPoints <= 0) {
-          p2Pieces[PAWN_3_PIECE_INDEX] = board[boardIdx];
-        } else {
-          throw "Already found 3 living PLAYER_2 Pawns";
-        }
+        p2Pieces.push_back(board[boardIdx]);
       } else if(s == "1mage") {
         board[boardIdx] = new Piece(PieceType::P2_MAGE, healthPoints, boardIdx);
-        p2Pieces[MAGE_PIECE_INDEX] = board[boardIdx];
+        p2Pieces.push_back(board[boardIdx]);
       } else if(s == "1assassin") {
         board[boardIdx] = new Piece(PieceType::P2_ASSASSIN, healthPoints, boardIdx);
-        p2Pieces[ASSASSIN_PIECE_INDEX] = board[boardIdx];
+        p2Pieces.push_back(board[boardIdx]);
+      } else if(s == "1knight") {
+        board[boardIdx] = new Piece(PieceType::P2_KNIGHT, healthPoints, boardIdx);
+        p2Pieces.push_back(board[boardIdx]);
       } else if(s == "1warrior") {
         board[boardIdx] = new Piece(PieceType::P2_WARRIOR, healthPoints, boardIdx);
-        p2Pieces[WARRIOR_PIECE_INDEX] = board[boardIdx];
+        p2Pieces.push_back(board[boardIdx]);
       }
     }
     b1.erase(0, pos + delimiter1.length());
@@ -2007,7 +2035,7 @@ std::vector<Piece*> Game::getAllPiecesByPlayer(Player player) {
  */
 unsigned long long nichess::perft(Game& game, int depth) {
   unsigned long long nodes = 0;
-  std::vector<PlayerAction> legalActions = game.usefulLegalActions();
+  std::vector<PlayerAction> legalActions = game.generateLegalActions();
   int numLegalActions = legalActions.size();
   if(depth == 1) {
     return (unsigned long long) numLegalActions;
@@ -2017,7 +2045,7 @@ unsigned long long nichess::perft(Game& game, int depth) {
   PlayerAction pa;
   for(int i = 0; i < numLegalActions; i++) {
     PlayerAction pa = legalActions[i];
-    ui = game.makeAction(pa.moveSrcIdx, pa.moveDstIdx, pa.abilitySrcIdx, pa.abilityDstIdx);
+    ui = game.makeAction(pa);
     nodes += perft(game, depth-1);
     game.undoAction(ui);
   }

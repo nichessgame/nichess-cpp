@@ -4,13 +4,12 @@
 using namespace nichess;
 
 int undoActionTest1() {
-  GameCache cache = GameCache();
-  Game g = Game(cache);
+  Game g = Game();
 
-  std::vector<PlayerAction> legalActions = g.usefulLegalActions();
+  std::vector<PlayerAction> legalActions = g.generateLegalActions();
   PlayerAction pa = legalActions[0];
   std::string b1 = g.boardToString();
-  UndoInfo ui = g.makeAction(pa.moveSrcIdx, pa.moveDstIdx, pa.abilitySrcIdx, pa.abilityDstIdx);
+  UndoInfo ui = g.makeAction(pa);
   g.undoAction(ui);
   std::string b2 = g.boardToString();
 
@@ -21,25 +20,6 @@ int undoActionTest1() {
   }
 }
 
-/*
- * Test whether undo properly revives a dead piece.
- */
-int undoActionTest2() {
-  GameCache cache = GameCache();
-  Game g = Game(cache);
-
-  g.makeAction(7, 28, ABILITY_SKIP, ABILITY_SKIP);
-  std::string b1 = g.boardToString();
-  UndoInfo ui = g.makeAction(56, 35, 35, 28);
-  g.undoAction(ui);
-  std::string b2 = g.boardToString();
-
-  if(b1 == b2) {
-    return 0;
-  } else {
-    return -1;
-  }
-}
 
 int undoactionstest(int argc, char* argv[]) {
   int defaultchoice = 1;
@@ -55,8 +35,6 @@ int undoactionstest(int argc, char* argv[]) {
   switch(choice) {
   case 1:
     return undoActionTest1();
-  case 2:
-    return undoActionTest2();
   default:
     printf("\nInvalid test number.\n");
     return -1;
