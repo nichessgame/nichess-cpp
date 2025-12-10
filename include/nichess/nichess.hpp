@@ -120,6 +120,7 @@ class Game {
     std::string boardToString();
     void boardFromString(std::string encodedBoard);
     bool isGameOver();
+    bool isGameDraw();
     std::optional<Player> winner();
     std::string dump() const;
     void reset();

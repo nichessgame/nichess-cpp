@@ -1863,7 +1863,7 @@ bool isActionValid(int srcIdx, int dstIdx) {
 
 bool Game::isActionLegal(int srcIdx, int dstIdx) {
   // TODO
-  return true;
+  return false;
 }
 
 Player Game::getCurrentPlayer() {
@@ -1881,7 +1881,15 @@ Piece Game::getPieceBySquareIndex(int squareIndex) {
 bool Game::isGameOver() {
   Piece* p1King = playerToKing[PLAYER_1];
   Piece* p2King = playerToKing[PLAYER_2];
-  if(p1King->healthPoints <= 0 || p2King->healthPoints <= 0 || repetitionsDraw) {
+  if(p1King->healthPoints <= 0 || p2King->healthPoints <= 0 || repetitionsDraw || moveNumber >= 333) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
+bool Game::isGameDraw() {
+  if(repetitionsDraw || moveNumber >= 333) {
     return true;
   } else {
     return false;
